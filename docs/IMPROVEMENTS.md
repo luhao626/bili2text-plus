@@ -8,7 +8,7 @@
 | 基线提交 | `92e13ca` *Improve video downloads and ignore generated media*（上游 `main`） |
 | 功能分支 | `feature/douyin-support`，从 `92e13ca` 直接拉出 |
 | 共同祖先 | `92e13ca`（与上游 `main` 一致，无 unrelated-histories 合并） |
-| 改动规模 | 21 个文件，+2858 / −595（`git diff --shortstat upstream/main...HEAD`） |
+| 改动规模 | 21 个文件，+2884 / −595（`git diff --shortstat upstream/main...HEAD`） |
 
 分支提交顺序：
 
