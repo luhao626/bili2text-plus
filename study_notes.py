@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
@@ -235,23 +236,54 @@ def _normalize_text(text: str) -> str:
 
 
 def quote_matches_source(quote: str, source: str) -> bool:
-    """判断 AI 的引文是否真的出现在原文里（允许标点/空白差异）。"""
+    """严格检查规范化后的引文连续出现在原文中；字符重叠不等于逐字证据。"""
     normalized_quote = _normalize_text(quote)
-    normalized_source = _normalize_text(source)
-    if not normalized_quote:
-        return False
-    if normalized_quote in normalized_source:
-        return True
-    # 长引文可能跨多段，用字符重叠比例兜底
-    if len(normalized_quote) < 8:
-        return False
-    source_chars = set(normalized_source)
-    overlap = sum(1 for char in normalized_quote if char in source_chars)
-    return overlap / len(normalized_quote) >= 0.85
+    return bool(normalized_quote) and normalized_quote in _normalize_text(source)
+
+
+def _quote_evidence_ids(
+    ids: list[str], id_map: dict[str, Segment], quote: str
+) -> list[str]:
+    """优先展示实际包含逐字引文的连续引用，避免只展示无关的前三段。"""
+    if quote:
+        for width in range(1, min(3, len(ids)) + 1):
+            for start in range(len(ids) - width + 1):
+                selected = ids[start : start + width]
+                source = " ".join(id_map[segment_id].text for segment_id in selected)
+                if quote_matches_source(quote, source):
+                    return selected
+    return ids[:3]
+
+
+def _missing_claim_markers(claim: str, source: str) -> list[str]:
+    """识别来源片段中未出现的阿拉伯数字、英文专名/技术缩写。
+
+    仅供保守标记待核实，不作正向语义验证；中文错误推断仍可能存在。
+    """
+    claim = unicodedata.normalize("NFKC", claim)
+    source = unicodedata.normalize("NFKC", source)
+    numbers = re.findall(r"(?<!\d)\d+(?:\.\d+)?%?", claim)
+    english = re.findall(r"(?<![A-Za-z])[A-Za-z][A-Za-z0-9_.+-]*", claim)
+    missing: list[str] = []
+    for token in numbers:
+        if not re.search(rf"(?<!\d){re.escape(token)}(?!\d)", source):
+            if token not in missing:
+                missing.append(token)
+    for token in english:
+        if len(token) < 2:
+            continue
+        if not re.search(rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])", source, re.I):
+            if token not in missing:
+                missing.append(token)
+    return missing
 
 
 def validate_payload(
-    payload: dict, id_map: dict[str, Segment], *, strict_keys: bool = True
+    payload: dict,
+    id_map: dict[str, Segment],
+    *,
+    strict_keys: bool = True,
+    allowed_ids: Optional[set[str]] = None,
 ) -> tuple[list[Chapter], list[KeyPoint], list[str], int]:
     """把 AI 的 JSON 转成结构对象；丢弃无效引用并记录数量。"""
     warnings: list[str] = []
@@ -285,7 +317,7 @@ def validate_payload(
             continue
         title = str(item.get("title") or "").strip()
         ids = [str(value) for value in (item.get("segment_ids") or [])]
-        valid_ids, invalid = _partition_ids(ids, id_map)
+        valid_ids, invalid = _partition_ids(ids, id_map, allowed_ids)
         dropped += invalid
         if not title:
             dropped += 1
@@ -304,25 +336,30 @@ def validate_payload(
         title = str(item.get("title") or "").strip()
         explanation = str(item.get("explanation") or "").strip()
         ids = [str(value) for value in (item.get("segment_ids") or [])]
-        valid_ids, invalid = _partition_ids(ids, id_map)
+        valid_ids, invalid = _partition_ids(ids, id_map, allowed_ids)
         dropped += invalid
         if not title or not valid_ids:
             dropped += 1
             continue
         quote = str(item.get("quote") or "").strip()
         evidence: list[tuple[str, str]] = []
-        needs_review = False
-        review_reason = ""
-        for segment_id in valid_ids[:3]:
+        source_text = " ".join(id_map[segment_id].text for segment_id in valid_ids)
+        reasons: list[str] = []
+        if not quote:
+            reasons.append("AI 未提供逐字引文")
+        elif not quote_matches_source(quote, source_text):
+            reasons.append("AI 引文与原文不一致")
+        evidence_ids = _quote_evidence_ids(valid_ids, id_map, quote)
+        for segment_id in evidence_ids:
             segment = id_map[segment_id]
             label = segment.time_label() or _paragraph_label(id_map, segment_id)
-            text = _truncate(segment.text.strip())
+            text = _excerpt_near_quote(segment.text.strip(), quote)
             evidence.append((label, text))
-        if quote:
-            source_text = " ".join(id_map[segment_id].text for segment_id in valid_ids)
-            if not quote_matches_source(quote, source_text):
-                needs_review = True
-                review_reason = "AI 引文与原文不一致，已改用原文并标记待核实"
+        missing = _missing_claim_markers(f"{title} {explanation}", source_text)
+        if missing:
+            reasons.append("数字或英文术语未在引用原文中出现：" + "、".join(missing[:8]))
+        needs_review = bool(reasons)
+        review_reason = "；".join(reasons)
         points.append(
             KeyPoint(
                 title=title,
@@ -338,12 +375,14 @@ def validate_payload(
 
 
 def _partition_ids(
-    ids: Iterable[str], id_map: dict[str, Segment]
+    ids: Iterable[str],
+    id_map: dict[str, Segment],
+    allowed_ids: Optional[set[str]] = None,
 ) -> tuple[list[str], int]:
     valid: list[str] = []
     invalid = 0
     for segment_id in ids:
-        if segment_id in id_map:
+        if segment_id in id_map and (allowed_ids is None or segment_id in allowed_ids):
             if segment_id not in valid:
                 valid.append(segment_id)
         else:
@@ -365,6 +404,27 @@ def _truncate(text: str, limit: int = MAX_QUOTE_CHARS) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "…"
+
+
+def _excerpt_near_quote(text: str, quote: str, limit: int = MAX_QUOTE_CHARS) -> str:
+    """长片段展示逐字引文附近的原文，而不总是截取片段开头。"""
+    if len(text) <= limit or not quote:
+        return _truncate(text, limit)
+    source_chars: list[str] = []
+    offsets: list[int] = []
+    for index, char in enumerate(text):
+        normalized = _normalize_text(char)
+        if normalized:
+            source_chars.extend(normalized)
+            offsets.extend([index] * len(normalized))
+    normalized_quote = _normalize_text(quote)
+    found = "".join(source_chars).find(normalized_quote) if normalized_quote else -1
+    if found < 0:
+        return _truncate(text, limit)
+    start = max(0, offsets[found] - 20)
+    end = min(len(text), start + limit)
+    excerpt = text[start:end].rstrip()
+    return ("…" if start > 0 else "") + excerpt + ("…" if end < len(text) else "")
 
 
 # --------------------------------------------------------------------------- #
@@ -398,6 +458,16 @@ def merge_results(
                 for segment_id in point.segment_ids:
                     if segment_id not in existing.segment_ids:
                         existing.segment_ids.append(segment_id)
+                for item in point.evidence:
+                    if item not in existing.evidence and len(existing.evidence) < 3:
+                        existing.evidence.append(item)
+                if point.needs_review:
+                    existing.needs_review = True
+                    if point.review_reason and point.review_reason not in existing.review_reason:
+                        existing.review_reason = (
+                            existing.review_reason + "；" + point.review_reason
+                            if existing.review_reason else point.review_reason
+                        )
                 continue
             point_index[key] = point
             point_order.append(key)
@@ -417,6 +487,8 @@ def render_markdown(notes: StudyNotes, document: TranscriptDocument) -> str:
     if notes.partial:
         lines.append("> 本笔记只覆盖了部分原文，未覆盖内容未纳入。")
         lines.append("")
+    lines.append("> 溯源说明：引文来自原始转写；知识点解释未经独立语义核验，请结合原文判断。")
+    lines.append("")
 
     lines.append(SECTION_CHAPTERS)
     lines.append("")
@@ -445,6 +517,9 @@ def render_markdown(notes: StudyNotes, document: TranscriptDocument) -> str:
         lines.append("")
         if point.explanation:
             lines.append(point.explanation)
+            lines.append("")
+        if point.needs_review:
+            lines.append(f"> 待核实原因：{point.review_reason or '证据支持性尚未确定'}")
             lines.append("")
         lines.append("**原文证据**")
         lines.append("")
@@ -513,7 +588,9 @@ def generate_study_notes(
         allowed_ids = [segment.id for segment in chunk]
         try:
             payload = _request_chunk(client, settings, chunk, allowed_ids)
-            chapters, points, warnings, dropped = validate_payload(payload, id_map)
+            chapters, points, warnings, dropped = validate_payload(
+                payload, id_map, allowed_ids=set(allowed_ids)
+            )
         except StudyNotesError as error:
             notes.complete = False
             notes.warnings.append(f"第 {index} 块失败：{error}")

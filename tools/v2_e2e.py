@@ -201,6 +201,9 @@ def main() -> int:
             return 0
         _log(f"[字幕] {fallback_reason or '未使用字幕'}")
     elif ref.platform == "local":
+        if mode == subtitles.MODE_SUBTITLE_ONLY:
+            _log("[失败] 本地文件未提供字幕提取入口；仅提取字幕模式不会运行 Whisper")
+            return 2
         fallback_reason = "本地文件默认使用 Whisper 转写"
 
     document, manifest = run_whisper(

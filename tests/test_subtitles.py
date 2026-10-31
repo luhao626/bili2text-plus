@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -10,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import subtitles  # noqa: E402
 from platforms import VideoRef  # noqa: E402
-from transcript import SOURCE_AUTOMATIC_SUBTITLE, SOURCE_HUMAN_SUBTITLE  # noqa: E402
+from transcript import SOURCE_AUTOMATIC_SUBTITLE, SOURCE_HUMAN_SUBTITLE, SOURCE_UNKNOWN_SUBTITLE  # noqa: E402
 
 SRT_SAMPLE = """1
 00:00:01,000 --> 00:00:04,000
@@ -194,7 +195,7 @@ class BilibiliPageIsolationTests(unittest.TestCase):
     def test_discovers_subtitles_by_target_cid_not_first_page(self):
         session = FakeSession(
             self._pages(),
-            [{"lan": "zh-CN", "lan_doc": "中文（中国）", "subtitle_url": "//sub/333.json"}],
+            [{"lan": "zh-CN", "type": 0, "lan_doc": "中文（中国）", "subtitle_url": "//sub/333.json"}],
             BILI_SAMPLE,
         )
         with mock.patch.object(subtitles, "_requests_session", return_value=session), \
@@ -214,7 +215,7 @@ class BilibiliPageIsolationTests(unittest.TestCase):
     def test_ai_subtitle_is_marked_automatic(self):
         session = FakeSession(
             self._pages(),
-            [{"lan": "ai-zh", "lan_doc": "中文（自动生成）", "subtitle_url": "//sub/ai.json"}],
+            [{"lan": "ai-zh", "type": 0, "lan_doc": "中文（自动生成）", "subtitle_url": "//sub/ai.json"}],
             BILI_SAMPLE,
         )
         with mock.patch.object(subtitles, "_requests_session", return_value=session), \
@@ -224,6 +225,49 @@ class BilibiliPageIsolationTests(unittest.TestCase):
              }):
             tracks, _meta = subtitles.discover_bilibili("BV1vwME6AEpd", 33)
         self.assertEqual(tracks[0].source_type, SOURCE_AUTOMATIC_SUBTITLE)
+
+
+    def test_normal_language_without_type_remains_unknown(self):
+        session = FakeSession(self._pages(), [{
+            "lan": "zh-CN", "lan_doc": "中文", "subtitle_url": "//sub/333.json"
+        }], BILI_SAMPLE)
+        with mock.patch.object(subtitles, "_requests_session", return_value=session), \
+             mock.patch.object(subtitles, "_bilibili_wbi_query", return_value="cid=333"), \
+             mock.patch.object(subtitles, "bilibili_page_meta", return_value={
+                 "cid": 333, "page": 33, "title": "第33P", "duration_ms": 413000
+             }):
+            tracks, _meta = subtitles.discover_bilibili("BV1vwME6AEpd", 33)
+        self.assertEqual(tracks[0].source_type, SOURCE_UNKNOWN_SUBTITLE)
+        chosen, _reason = subtitles.select_track(tracks, mode=subtitles.MODE_SMART)
+        self.assertIsNone(chosen)
+
+    def test_non_ai_language_with_type_one_is_automatic(self):
+        session = FakeSession(self._pages(), [{
+            "lan": "zh-CN", "type": 1, "subtitle_url": "//sub/333.json"
+        }], BILI_SAMPLE)
+        with mock.patch.object(subtitles, "_requests_session", return_value=session), \
+             mock.patch.object(subtitles, "_bilibili_wbi_query", return_value="cid=333"), \
+             mock.patch.object(subtitles, "bilibili_page_meta", return_value={
+                 "cid": 333, "page": 33, "title": "第33P", "duration_ms": 413000
+             }):
+            tracks, _meta = subtitles.discover_bilibili("BV1vwME6AEpd", 33)
+        self.assertEqual(tracks[0].source_type, SOURCE_AUTOMATIC_SUBTITLE)
+
+    def test_wbi_error_does_not_trust_legacy_unsigned_endpoint(self):
+        class DeniedSession(FakeSession):
+            def get(self, url, params=None, headers=None, timeout=None, **kwargs):
+                self.calls.append((url, dict(params or {})))
+                return FakeResponse({"code": -400, "message": "no access"})
+        session = DeniedSession(self._pages(), [], BILI_SAMPLE)
+        with mock.patch.object(subtitles, "_requests_session", return_value=session), \
+             mock.patch.object(subtitles, "_bilibili_wbi_query", return_value="cid=333"), \
+             mock.patch.object(subtitles, "bilibili_page_meta", return_value={
+                 "cid": 333, "page": 33, "title": "第33P", "duration_ms": 413000
+             }):
+            with self.assertRaises(subtitles.SubtitleError):
+                subtitles.discover_bilibili("BV1vwME6AEpd", 33)
+        self.assertTrue(session.calls)
+        self.assertTrue(all("/x/player/v2" not in url for url, _ in session.calls))
 
 
 class ResolveTests(unittest.TestCase):
@@ -295,6 +339,23 @@ class ResolveTests(unittest.TestCase):
                 mode=subtitles.MODE_WHISPER_ONLY,
             )
         self.assertIsNone(selection.document)
+
+
+class LocalSubtitleOnlyTests(unittest.TestCase):
+    def test_cli_local_file_subtitle_only_never_calls_whisper(self):
+        from tools import v2_e2e
+        with tempfile.TemporaryDirectory() as folder:
+            ref = VideoRef(
+                platform="local", video_id="local-demo",
+                canonical_url="/tmp/local_demo.mp4", cache_key="local_demo",
+                page=None, title_hint="本地样例"
+            )
+            argv = ["v2_e2e.py", "--url", "/tmp/local_demo.mp4", "--mode", "subtitle-only",
+                    "--output-root", folder]
+            with mock.patch.object(sys, "argv", argv), \
+                 mock.patch.object(v2_e2e, "resolve_video_input", return_value=ref), \
+                 mock.patch.object(v2_e2e, "run_whisper", side_effect=AssertionError("Whisper 不得运行")):
+                self.assertEqual(v2_e2e.main(), 2)
 
 
 if __name__ == "__main__":

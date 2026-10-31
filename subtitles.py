@@ -7,9 +7,9 @@
 4. 校验：空字幕、损坏、非法时间码、时间不连续/覆盖率过低 → 不产出"看似成功"的结果。
 
 重要约束：
-- yt-dlp 的 ``subtitles`` 视为人工字幕，``automatic_captions`` 视为自动字幕；
+- yt-dlp 的 ``subtitles`` 视为平台普通字幕类别（不独立保证逐字人工制作）；
 - 无法判断来源时标 ``unknown_subtitle``，绝不冒充人工字幕；
-- B站 ``lan`` 以 ``ai-`` 开头的是 AI 生成字幕，必须标为自动字幕；
+- B站 ``lan`` 以 ``ai-`` 开头或 ``type=1`` 的轨道标自动；仅 ``type=0`` 且语言码不是 AI 的才标 CC 类别；
 - 本模块不下载音视频，也不调用 Whisper。
 """
 
@@ -320,7 +320,7 @@ def tracks_from_info(info: dict) -> list[SubtitleTrack]:
     """从 yt-dlp 的 info dict 构造候选轨道（纯函数，便于测试）。"""
     tracks: list[SubtitleTrack] = []
     for bucket, source_type, evidence in (
-        ("subtitles", SOURCE_HUMAN_SUBTITLE, "yt-dlp subtitles（上传者/人工提供）"),
+        ("subtitles", SOURCE_HUMAN_SUBTITLE, "yt-dlp 普通字幕类别（不独立保证逐字人工制作）"),
         ("automatic_captions", SOURCE_AUTOMATIC_SUBTITLE, "yt-dlp automatic_captions（平台语音识别）"),
     ):
         for language, formats in (info.get(bucket) or {}).items():
@@ -470,9 +470,8 @@ def discover_bilibili(
         raise SubtitleError("目标分P缺少 cid，无法定位字幕。")
 
     session = _requests_session()
-    subtitles: list[dict] = []
-    last_error = None
-    # 优先 WBI 签名接口，失败再退回普通接口
+    # 只信任按目标 CID 签名查询的 WBI 接口；旧版无签名接口可能返回
+    # 无法确认所属视频的数据，不能作为字幕正文的权威来源。
     try:
         query = _bilibili_wbi_query({"bvid": video_id, "cid": cid})
         response = session.get(
@@ -482,42 +481,31 @@ def discover_bilibili(
         )
         response.raise_for_status()
         payload = response.json()
-        if payload.get("code") == 0:
-            subtitles = ((payload.get("data") or {}).get("subtitle") or {}).get("subtitles") or []
-    except Exception as error:  # noqa: BLE001
-        last_error = error
-        print(f"WBI 字幕接口失败，改用普通接口：{error}")
-
-    if not subtitles:
-        try:
-            response = session.get(
-                "https://api.bilibili.com/x/player/v2",
-                params={"bvid": video_id, "cid": cid},
-                headers=_bilibili_headers(),
-                timeout=15,
+        if payload.get("code") != 0:
+            raise SubtitleError(
+                f"B站 WBI 字幕接口返回错误：{payload.get('code')}"
             )
-            response.raise_for_status()
-            payload = response.json()
-            if payload.get("code") == 0:
-                subtitles = ((payload.get("data") or {}).get("subtitle") or {}).get("subtitles") or []
-        except Exception as error:  # noqa: BLE001
-            last_error = last_error or error
-
-    if not subtitles and last_error is not None:
-        raise SubtitleError(f"B站字幕接口调用失败：{last_error}")
+        subtitles = ((payload.get("data") or {}).get("subtitle") or {}).get("subtitles") or []
+    except Exception as error:  # noqa: BLE001
+        raise SubtitleError(f"无法通过目标 CID 获取可信的 B站字幕：{error}") from error
 
     tracks: list[SubtitleTrack] = []
     for item in subtitles:
         language = str(item.get("lan") or "")
-        if not language:
-            source_type = SOURCE_UNKNOWN_SUBTITLE
-            evidence = "B站字幕条目缺少 lan 字段，无法判断来源"
-        elif language.lower().startswith("ai-"):
+        declared_type = item.get("type")
+        # B站 type: 0=CC, 1=AI；不能以非 ai- 的语言码反推人工字幕。
+        # ai_type 在不同接口/版本含义不一，单独不足以确认人工来源。
+        if language.lower().startswith("ai-") or declared_type == 1:
             source_type = SOURCE_AUTOMATIC_SUBTITLE
-            evidence = f"B站 AI 字幕（lan={language}）"
-        else:
+        elif language and type(declared_type) is int and declared_type == 0:
             source_type = SOURCE_HUMAN_SUBTITLE
-            evidence = f"B站 CC 字幕（lan={language}，非 ai- 前缀）"
+        else:
+            source_type = SOURCE_UNKNOWN_SUBTITLE
+        evidence = (
+            f"B站字幕元数据（lan={language or '缺失'}, "
+            f"type={declared_type!r}, ai_type={item.get('ai_type')!r}；"
+            f"分类={source_type}）"
+        )
         url = str(item.get("subtitle_url") or "")
         if url.startswith("//"):
             url = "https:" + url

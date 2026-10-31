@@ -311,5 +311,89 @@ class FailureKeepsTranscriptTests(unittest.TestCase):
             self.assertFalse(os.path.exists(paths.notes_md))
 
 
+
+class EvidenceIntegrityTests(unittest.TestCase):
+    def test_rearranged_same_characters_are_not_an_original_quote(self):
+        self.assertFalse(study_notes.quote_matches_source(
+            "构结体实系关谱图识知", "知识图谱关系实体结构"
+        ))
+
+    def test_unbacked_numeric_claim_is_marked_for_review(self):
+        doc = document()
+        doc.segments[0].text = "图谱包含若干疾病数据，用于后续匹配。"
+        payload = {"chapters": [], "key_points": [{
+            "title": "疾病数据", "explanation": "系统拥有8000条疾病数据。",
+            "segment_ids": ["seg_0001"], "quote": "图谱包含若干疾病数据"
+        }]}
+        _chapters, points, _warnings, _dropped = study_notes.validate_payload(payload, doc.id_map())
+        self.assertTrue(points[0].needs_review)
+        self.assertIn("8000", points[0].review_reason)
+
+    def test_unbacked_latin_terms_are_marked_for_review(self):
+        doc = document()
+        doc.segments[0].text = "把特征词放到表中，使用树模型匹配。"
+        payload = {"chapters": [], "key_points": [{
+            "title": "AC算法", "explanation": "使用Rinrith Wurst表处理数据。",
+            "segment_ids": ["seg_0001"], "quote": "使用树模型匹配"
+        }]}
+        _chapters, points, _warnings, _dropped = study_notes.validate_payload(payload, doc.id_map())
+        self.assertTrue(points[0].needs_review)
+        for token in ("AC", "Rinrith", "Wurst"):
+            self.assertIn(token, points[0].review_reason)
+
+    def test_missing_quote_requires_review(self):
+        doc = document()
+        payload = {"chapters": [], "key_points": [{
+            "title": "无引文", "explanation": "解释", "segment_ids": ["seg_0001"]
+        }]}
+        _chapters, points, _warnings, _dropped = study_notes.validate_payload(payload, doc.id_map())
+        self.assertTrue(points[0].needs_review)
+        self.assertIn("未提供", points[0].review_reason)
+
+    def test_quote_appearing_later_is_visible_in_evidence(self):
+        doc = document()
+        doc.segments[3-1].text = "这是后面的关键证据，不能漏掉。"
+        payload = {"chapters": [], "key_points": [{
+            "title": "后段内容", "explanation": "解释",
+            "segment_ids": ["seg_0001", "seg_0002", "seg_0003"],
+            "quote": "这是后面的关键证据"
+        }]}
+        _chapters, points, _warnings, _dropped = study_notes.validate_payload(payload, doc.id_map())
+        self.assertIn("关键证据", points[0].evidence[0][1])
+
+    def test_long_segment_evidence_contains_quote_after_220_chars(self):
+        doc = document()
+        doc.segments[0].text = "引子" * 130 + "重要原文证据" + "尾声" * 40
+        payload = {"chapters": [], "key_points": [{
+            "title": "知识点", "explanation": "解释",
+            "segment_ids": ["seg_0001"], "quote": "重要原文证据"
+        }]}
+        _chapters, points, _warnings, _dropped = study_notes.validate_payload(payload, doc.id_map())
+        self.assertIn("重要原文证据", points[0].evidence[0][1])
+
+    def test_reference_outside_current_chunk_is_rejected(self):
+        doc = document()
+        payload = {"chapters": [], "key_points": [{
+            "title": "错误引用", "explanation": "解释",
+            "segment_ids": ["seg_0002"], "quote": "第 2 段的内容文本"
+        }]}
+        _chapters, points, _warnings, dropped = study_notes.validate_payload(
+            payload, doc.id_map(), allowed_ids={"seg_0001"}
+        )
+        self.assertEqual(points, [])
+        self.assertGreater(dropped, 0)
+
+    def test_markdown_discloses_semantic_limit_and_review_reason(self):
+        doc = document()
+        notes = study_notes.StudyNotes(key_points=[study_notes.KeyPoint(
+            "风险内容", "解释", ["seg_0001"], [("[00:00]", "证据")],
+            True, "数据未被原文支持"
+        )])
+        rendered = study_notes.render_markdown(notes, doc)
+        self.assertIn("未经独立语义核验", rendered)
+        self.assertIn("待核实原因：数据未被原文支持", rendered)
+        self.assertEqual(len(re.findall(r"^## ", rendered, flags=re.M)), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

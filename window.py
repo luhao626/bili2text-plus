@@ -290,8 +290,12 @@ def worker_process(link: str) -> None:
 
         fallback_reason = ""
         selection = None
-        # 本地文件按既定约定继续走 Whisper，不额外探测字幕
+        # 本地文件本轮只支持 Whisper；仅字幕模式必须明确失败，不得启动 Whisper。
         if ref.platform == "local":
+            if mode == subtitles.MODE_SUBTITLE_ONLY:
+                post("log", "[失败] 本地文件未提供字幕提取入口；仅提取字幕模式不会运行 Whisper")
+                post("status", "本地文件仅字幕模式不可用")
+                return
             fallback_reason = "本地文件默认使用 Whisper 转写"
         elif mode != subtitles.MODE_WHISPER_ONLY:
             post("stage", "① 查找字幕")

@@ -95,14 +95,15 @@ V2 把"文字从哪来"和"文字怎么变成笔记"拆成两条独立的链：
 
 | 平台 | 方式 | 分P处理 |
 | --- | --- | --- |
-| B站 | `x/player/pagelist` 取目标 P 的 **cid** → `x/player/wbi/v2`（WBI 签名）→ 失败退回 `x/player/v2` | 一律以目标 P 的 cid 查询，**不会**用第 1P 的 cid |
+| B站 | `x/player/pagelist` 取目标 P 的 **cid** → `x/player/wbi/v2`（WBI 签名）；签名查询失败则回退 Whisper，不采用旧版无签名接口的字幕正文 | 一律以目标 P 的 cid 查询，**不会**用第 1P 的 cid |
 | YouTube / 其他 | `yt-dlp` info dict：`subtitles`（人工）与 `automatic_captions`（自动） | 无分P概念 |
 
 B站字幕来源判定：
 
-- `lan` 以 `ai-` 开头 → `automatic_subtitle`（B站 AI 字幕）；
-- `lan` 为普通语言码 → `human_subtitle`，证据文案记录 `lan` 值；
-- 缺 `lan` → `unknown_subtitle`。
+- `lan` 以 `ai-` 开头，或轨道 `type=1` → `automatic_subtitle`（B站 AI 字幕）；
+- `lan` 不是 `ai-` 且轨道 `type=0` → `human_subtitle`（按平台 CC 类型分类，非独立人工审稿证明）；
+- 仅有普通语言码而缺少可靠 `type` 或类型未知 → `unknown_subtitle`，智能模式回退 Whisper；`ai-` 与 `type=0` 矛盾时按自动字幕保守处理；
+- `ai_type` 在不同接口样本的含义并不一致，不能仅凭其为 0 判断成人工字幕。
 
 YouTube：`subtitles` → 人工，`automatic_captions` → 自动。yt-dlp 本身不区分"社区贡献"与"作者上传"，
 因此这里的"人工"仅表示"非平台 ASR 生成"，这一点在文档中如实说明。
@@ -114,6 +115,8 @@ YouTube：`subtitles` → 人工，`automatic_captions` → 自动。yt-dlp 本�
 | 智能模式（默认） | ✅ 用字幕，不下载不转写 | ⚠️ 不用，回退 Whisper 并说明原因 | ⚠️ 回退 Whisper |
 | 强制 Whisper | 忽略字幕 | 忽略字幕 | 转写 |
 | 仅提取字幕 | ✅ 用字幕 | ✅ 用自动字幕但**明确标注**为自动 | ❌ 报错，不转写 |
+
+本地音视频在本轮没有字幕提取入口：选择「仅提取字幕」必须明确失败并且不运行 Whisper（GUI 与 E2E 工具一致）。
 
 设计取舍：智能模式**不**使用自动字幕，因为需求明确"有可靠人工字幕优先，没有则调用 Whisper"，
 且要求"默认模式不应静默将自动字幕冒充人工字幕"。自动字幕只在"仅提取字幕"下使用，并如实标注。
@@ -155,8 +158,9 @@ YouTube：`subtitles` → 人工，`automatic_captions` → 自动。yt-dlp 本�
 因此：
 
 - 引用不存在的 ID → 直接丢弃并计数（`dropped_refs`），不编造证据；
-- AI 引文与原文对不上（规范化后不是子串、字符重叠 < 85%）→ 仍用原文，但该知识点标题后标
-  **（待核实）**；
+- AI 引文需规范化后在原文中连续出现，取消仅靠字符集合重叠的模糊放行；不匹配或缺少引文 → 标**（待核实）**；
+- 知识点中的数字、英文术语若不在所引用原文出现 → 标**（待核实）**，显示原因；这仅能发现部分可疑结论；
+- Markdown 在两大栏目之前明确提示：证据可溯源不代表知识点解释经过独立语义核验；
 - 章节/知识点没有任何有效引用 → 丢弃，不留空壳。
 
 ### 4.2 输出结构
