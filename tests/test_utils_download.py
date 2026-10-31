@@ -76,6 +76,25 @@ class LocalMediaImportTests(unittest.TestCase):
         self.assertTrue(os.path.exists(imported))
         self.assertEqual(os.path.getsize(imported), os.path.getsize(self.source))
 
+    def test_default_mode_makes_independent_copy(self):
+        """默认必须是复制：缓存改动不得影响用户原文件。"""
+        cache_key = utils.download_video(self.source)
+        imported = os.path.join("bilibili_video", cache_key, "样例视频.mp4")
+        self.assertNotEqual(
+            os.stat(self.source).st_ino, os.stat(imported).st_ino,
+            "默认模式不应产生硬链接",
+        )
+        before = open(self.source, "rb").read()
+        with open(imported, "ab") as handle:  # 模拟缓存被改动/覆盖
+            handle.write(b"tampered")
+        self.assertEqual(open(self.source, "rb").read(), before)
+
+    def test_hardlink_is_opt_in_only(self):
+        with mock.patch.dict(os.environ, {"BILI2TEXT_LOCAL_IMPORT": "hardlink"}):
+            cache_key = utils.download_video(self.source)
+        imported = os.path.join("bilibili_video", cache_key, "样例视频.mp4")
+        self.assertEqual(os.stat(self.source).st_ino, os.stat(imported).st_ino)
+
     def test_original_file_is_not_modified(self):
         before = open(self.source, "rb").read()
         utils.download_video(self.source)

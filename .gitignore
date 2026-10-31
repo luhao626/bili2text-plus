@@ -206,3 +206,11 @@ assets/
 
 # Local editor and agent settings
 .claude/settings.local.json
+
+# 导出的 cookies / 会话文件（含登录态，绝不提交）
+cookies.txt
+*cookies*.txt
+cook*.txt
+
+# 环境变量模板保留，其余 .env* 一律忽略
+!.env.example

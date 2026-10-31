@@ -5,11 +5,13 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+import sys
 import time
 from ctypes import wintypes
 
-PY = r"C:\Users\Lenovo\WorkBuddy\2026-10-27-21-45-29\bili2text\.venv\Scripts\python.exe"
-ROOT = r"C:\Users\Lenovo\WorkBuddy\2026-10-27-21-45-29\bili2text-plus"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 优先用当前解释器；也可用环境变量 BILI2TEXT_PYTHON 指定带依赖的虚拟环境
+PY = os.environ.get("BILI2TEXT_PYTHON") or sys.executable
 OUT_DIR = os.path.join(ROOT, "docs", "screenshots")
 os.makedirs(OUT_DIR, exist_ok=True)
 TARGET = os.path.join(OUT_DIR, "ui-main.png")

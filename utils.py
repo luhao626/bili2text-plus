@@ -428,10 +428,21 @@ def _download_with_ytdlp(ref, output_dir):
     return False
 
 
-def _prepare_local_media(ref, output_dir, notify):
-    """把本地媒体文件接入缓存目录；同盘用硬链接，跨盘或失败时复制。
+def _local_import_mode():
+    """本地文件接入方式：默认安全复制；显式选择才用硬链接。"""
+    mode = (os.getenv("BILI2TEXT_LOCAL_IMPORT") or "copy").strip().lower()
+    return "hardlink" if mode == "hardlink" else "copy"
 
-    这样后续「切音 → 转写」流程与下载来的视频完全一致，也不改动原始文件。
+
+def _prepare_local_media(ref, output_dir, notify):
+    """把本地媒体文件接入缓存目录。
+
+    默认**复制**：缓存副本与用户原文件是两个独立文件，此后无论转码、重封装
+    还是用户手动改动缓存，都不可能影响原文件 —— 这是源文件保护的底线。
+
+    只有用户显式设置 ``BILI2TEXT_LOCAL_IMPORT=hardlink`` 时才使用硬链接
+    （同盘零拷贝，适合超大文件）。硬链接与原文件共享同一份数据，写入任一路径
+    都会改到另一路径，因此打印明确警告，并且仍放在缓存目录内由本项目只读使用。
     """
     source = ref.canonical_url
     if not os.path.isfile(source):
@@ -446,12 +457,17 @@ def _prepare_local_media(ref, output_dir, notify):
         return True
 
     notify("正在导入本地文件...")
-    try:
-        os.link(source, destination)
-        print(f"已硬链接本地文件（不占用额外空间）: {destination}")
-    except OSError:
-        shutil.copy2(source, destination)
-        print(f"已复制本地文件: {destination}")
+    if _local_import_mode() == "hardlink":
+        try:
+            os.link(source, destination)
+            print(f"已硬链接本地文件（不占用额外空间）: {destination}")
+            print("注意：硬链接与原文件共享数据，请勿直接修改缓存目录中的该文件。")
+            return True
+        except OSError as error:
+            print(f"硬链接失败，改为安全复制：{error}")
+
+    shutil.copy2(source, destination)
+    print(f"已安全复制本地文件（原文件不会被修改）: {destination}")
     return True
 
 
