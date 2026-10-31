@@ -6,8 +6,11 @@ import certifi
 import sys
 import requests
 import json
+import time
 from dotenv import load_dotenv
 from openai import OpenAI
+
+import llm_config
 
 # 加载.env文件
 load_dotenv()
@@ -26,28 +29,53 @@ os.environ['TQDM_DISABLE'] = '1'
 whisper_model = None
 USE_OPENAI_API = bool(os.getenv("OPENAI_API_KEY")) and str(os.getenv("USE_OPENAI_WHISPER", "0")).lower() not in ("0", "false", "no")
 OPENAI_MODEL = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1")
-MINIMAX_API_KEY = os.getenv("MINIMAX_APIKEY") or os.getenv("MINIMAX_API_KEY")
-MINIMAX_API_BASE = os.getenv("MINIMAX_API_BASE", "https://api.minimaxi.com/v1")
-MINIMAX_MODEL = os.getenv("MINIMAX_MODEL", "MiniMax-M3")
+
+# AI 润色配置：优先 LLM_*，兼容旧的 MINIMAX_*（见 llm_config.py）
+LLM_SETTINGS = llm_config.load_settings()
+# 兼容旧变量名
+MINIMAX_API_KEY = LLM_SETTINGS.api_key
+MINIMAX_API_BASE = LLM_SETTINGS.base_url
+MINIMAX_MODEL = LLM_SETTINGS.model
 
 # 停止事件（由外部设置）
 stop_event = None
+
+# Markdown 输出目录（可在界面上修改）
+OUTPUT_DIR = "outputs"
+
+def set_output_dir(path):
+    """设置 Markdown 输出目录，返回规范化后的绝对路径。"""
+    global OUTPUT_DIR
+    if path:
+        OUTPUT_DIR = str(path)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    return os.path.abspath(OUTPUT_DIR)
 
 def set_stop_event(event):
     """设置停止事件，用于中断长时间运行的任务"""
     global stop_event
     stop_event = event
 
-# 初始化 MiniMax OpenAI 兼容客户端
-minimax_client = None
-if MINIMAX_API_KEY:
-    try:
-        minimax_client = OpenAI(
-            api_key=MINIMAX_API_KEY,
-            base_url=MINIMAX_API_BASE,
-        )
-    except Exception as e:
-        print(f"初始化 MiniMax 客户端失败: {e}")
+def reload_llm_settings(override=None):
+    """重新读取 AI 配置（UI 修改配置后调用），返回最新设置。"""
+    global LLM_SETTINGS, MINIMAX_API_KEY, MINIMAX_API_BASE, MINIMAX_MODEL
+    global minimax_client, llm_client
+    LLM_SETTINGS = llm_config.load_settings(override)
+    MINIMAX_API_KEY = LLM_SETTINGS.api_key
+    MINIMAX_API_BASE = LLM_SETTINGS.base_url
+    MINIMAX_MODEL = LLM_SETTINGS.model
+    llm_client = llm_config.build_client(LLM_SETTINGS)
+    minimax_client = llm_client  # 旧变量名保留
+    return LLM_SETTINGS
+
+def test_llm_connection(override=None):
+    """测试当前 AI 配置是否可用，返回结构化结果。"""
+    settings = llm_config.load_settings(override) if override else LLM_SETTINGS
+    return llm_config.test_connection(settings)
+
+# 初始化 AI 客户端
+llm_client = llm_config.build_client(LLM_SETTINGS)
+minimax_client = llm_client  # 兼容旧代码
 
 def is_cuda_available():
     return whisper.torch.cuda.is_available()
@@ -116,8 +144,8 @@ def run_analysis(filename, model="tiny", prompt="以下是普通话的句子。"
         audio_list,
         key=lambda x: int(os.path.splitext(x)[0])  # 按文件名数字排序
     )
-    # 创建outputs文件夹
-    os.makedirs("outputs", exist_ok=True)
+    # 创建输出文件夹
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     print("正在转换文本...")
 
     audio_list.sort(key=lambda x: int(x.split(".")[0])) # 将 audio_list 按照切片序号排序
@@ -142,7 +170,7 @@ def run_analysis(filename, model="tiny", prompt="以下是普通话的句子。"
     raw_text = "\n".join(texts)
     
     # 只保存原始转写结果
-    output_path = f"outputs/{filename}.md"
+    output_path = os.path.join(OUTPUT_DIR, f"{filename}.md")
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("# 转写结果（原始）\n\n")
         f.write(raw_text.strip())
@@ -162,13 +190,17 @@ def refine_text(filename, prompt="以下是普通话的句子。"):
         润色后的文本
     """
     if not MINIMAX_API_KEY:
-        raise RuntimeError("未配置 MINIMAX_APIKEY，无法进行AI润色。请在.env文件中配置。")
+        raise RuntimeError(
+            "未配置 AI 润色密钥，无法进行AI润色。"
+            "请设置 LLM_API_KEY（或兼容旧的 MINIMAX_APIKEY），"
+            "或在界面「AI 润色」区域填写后重试。"
+        )
 
     if not minimax_client:
-        raise RuntimeError("MiniMax 客户端未初始化，请检查 MINIMAX_APIKEY 配置是否正确。")
+        raise RuntimeError("AI 客户端未初始化，请检查 API Key、Base URL 与模型 ID 是否正确。")
     
     # 读取原始转写文档
-    raw_file_path = f"outputs/{filename}.md"
+    raw_file_path = os.path.join(OUTPUT_DIR, f"{filename}.md")
     if not os.path.exists(raw_file_path):
         raise FileNotFoundError(f"未找到原始转写文档: {raw_file_path}，请先执行转写。")
     
@@ -184,7 +216,7 @@ def refine_text(filename, prompt="以下是普通话的句子。"):
             print("任务已停止")
             raise KeyboardInterrupt("用户请求停止任务")
         
-        print("正在调用 MiniMax 进行润色...")
+        print(f"正在调用 AI 润色（{MINIMAX_MODEL} @ {MINIMAX_API_BASE}）...")
         refined_text = _refine_with_minimax(raw_text, prompt)
         
         # 再次检查是否请求停止
@@ -193,9 +225,13 @@ def refine_text(filename, prompt="以下是普通话的句子。"):
             raise KeyboardInterrupt("用户请求停止任务")
         
         print("润色完成。")
-        
+
+        # 防止把空内容写成空文件
+        if not refined_text or not refined_text.strip():
+            raise RuntimeError("润色结果为空，已放弃写入文件（原始文档未改动）。")
+
         # 保存润色结果到新文件（不覆盖原始文档）
-        refined_output_path = f"outputs/{filename}_refined.md"
+        refined_output_path = os.path.join(OUTPUT_DIR, f"{filename}_refined.md")
         with open(refined_output_path, "w", encoding="utf-8") as f:
             f.write("# 转写结果（AI润色版）\n\n")
             f.write(refined_text.strip())
@@ -369,49 +405,91 @@ def _refine_with_minimax(text: str, prompt: str) -> str:
     return '\n\n'.join(refined_chunks)
 
 
+def _strip_repetition_tail(text: str) -> str:
+    """
+    清理模型偶发的“句子级重复循环”尾部。
+    免费模型在长文本下可能连续重复同一句话数百遍，导致输出膨胀。
+    这里一旦发现连续 4 句完全相同，就从重复开始处截断。
+    """
+    parts = re.split(r'(?<=[。！？!?\n])', text)
+    prev = None
+    run = 0
+    for idx, part in enumerate(parts):
+        sentence = part.strip()
+        if sentence and sentence == prev:
+            run += 1
+        else:
+            prev = sentence
+            run = 1
+        if run >= 4:
+            return ''.join(parts[:idx - run + 1]).strip()
+    return text.strip()
+
+
 def _refine_single_chunk(text: str, prompt: str) -> str:
     """对单个文本块调用 MiniMax API 进行润色。使用 OpenAI 兼容客户端。"""
     if not minimax_client:
         raise RuntimeError("MiniMax 客户端未初始化，请检查 MINIMAX_APIKEY 配置。")
 
-    try:
-        # 使用 OpenAI 兼容客户端调用 MiniMax API
-        response = minimax_client.chat.completions.create(
-            model=MINIMAX_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是一个严格的中文转写润色助手。"
-                        "请仅对给定文本进行错别字、标点、断句和轻微语气调整，"
-                        "保持原始语序与信息完整，不新增总结、点评、延伸内容，"
-                        "不改写成新的风格，也不要删除有效信息。"
-                        "如果文本分块提供，也要保持上下文衔接。"
-                        "输出与输入同一语种，并保持 Markdown 中的段落结构。"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"主题提示：{prompt}\n\n"
-                        "以下是转写原文，请仅进行必要的纠错和轻量润色，不要总结：\n"
-                        f"{text}"
-                    ),
-                },
-            ],
-            temperature=0.15,  # 降低随机性，避免过度创作
-            max_tokens=32000,  # 最大输出 tokens，避免润色结果过长
-        )
+    # 输出上限按输入长度动态设定，避免模型陷入重复循环把预算耗尽
+    input_tokens = _estimate_tokens(text)
+    max_output_tokens = max(2000, min(32000, int(input_tokens * 2.5) + 800))
+
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            # 使用 OpenAI 兼容客户端调用 MiniMax API
+            response = minimax_client.chat.completions.create(
+                model=MINIMAX_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是一个严格的中文转写润色助手。"
+                            "请仅对给定文本进行错别字、标点、断句和轻微语气调整，"
+                            "保持原始语序与信息完整，不新增总结、点评、延伸内容，"
+                            "不改写成新的风格，也不要删除有效信息。"
+                            "如果文本分块提供，也要保持上下文衔接。"
+                            "输出与输入同一语种，并保持 Markdown 中的段落结构。"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"主题提示：{prompt}\n\n"
+                            "以下是转写原文，请仅进行必要的纠错和轻量润色，不要总结：\n"
+                            f"{text}"
+                        ),
+                    },
+                ],
+                temperature=0.3,  # 略高一点，降低长文本重复循环概率
+                max_tokens=max_output_tokens,
+                # 智谱 GLM 等模型默认开思考模式，会吃光输出预算，需显式关闭
+                **llm_config.request_kwargs(LLM_SETTINGS),
+            )
+        except Exception as e:
+            last_error = e
+            status = getattr(e, "status_code", None)
+            # 1305/1302 等限流与临时过载：退避重试
+            if status in (429, 500, 502, 503, 504) and attempt < 3:
+                wait = 10 * attempt
+                print(f"润色请求被限流（HTTP {status}），{wait}s 后重试（第 {attempt}/3 次）...")
+                time.sleep(wait)
+                continue
+            category, friendly = llm_config.classify_error(e)
+            raise RuntimeError(f"AI 润色调用失败（{category}）：{friendly}")
 
         # 获取返回的内容
         if response.choices and len(response.choices) > 0:
             content = response.choices[0].message.content or ""
             # MiniMax M 系列为推理模型，剥离返回内容中的 <think>...</think> 思考过程
             content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL)
+            content = _strip_repetition_tail(content)
+            if not content.strip():
+                raise RuntimeError(
+                    "AI 返回空内容（思考模式可能未关闭或输出被截断）"
+                )
             return content
         else:
-            raise RuntimeError("MiniMax API 返回空结果")
-
-    except Exception as e:
-        raise RuntimeError(f"MiniMax API 调用失败: {str(e)}")
+            raise RuntimeError("AI 接口返回空结果")
     

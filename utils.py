@@ -1,11 +1,20 @@
 import os
 import re
+import shutil
 import subprocess
+import sys
 import glob  # 新增导入
 import hashlib
 import time
 import requests
 from urllib.parse import parse_qs, urlencode, urlparse
+
+from platforms import (
+    UnsupportedLinkError,
+    is_short_link,
+    resolve_video_input,
+    safe_filename,
+)
 
 
 # Bilibili uses this permutation to derive the WBI signing key.  Keeping the
@@ -119,12 +128,13 @@ def _download_media_from_urls(session, media_urls, headers, temporary_path, expe
     raise RuntimeError(f"所有B站视频线路均下载失败: {last_error}")
 
 
-def _download_bilibili_via_wbi(file_id, output_dir, *, direct=True):
-    """Download the first Bilibili page through the signed playback endpoint.
+def _download_bilibili_via_wbi(file_id, output_dir, *, direct=True, page=None):
+    """Download one specific Bilibili page through the signed playback endpoint.
 
     yt-dlp remains the preferred path.  This fallback is deliberately limited
     to a single video page because the rest of the application expects one
-    media file for a submitted link.
+    media file for a submitted link.  ``page`` keeps ``?p=`` selections intact
+    instead of silently falling back to the first page of a multi-part video.
     """
     headers = {
         "User-Agent": (
@@ -157,6 +167,15 @@ def _download_bilibili_via_wbi(file_id, output_dir, *, direct=True):
     if page_data.get("code") != 0 or not pages:
         raise RuntimeError(f"获取视频分P信息失败: {page_data.get('message', '无可下载分P')}")
 
+    page_number = page or 1
+    if page_number > len(pages):
+        raise RuntimeError(
+            f"该视频共 {len(pages)} 个分P，第 {page_number} P 不存在，请检查链接中的 p 参数。"
+        )
+    target_page = pages[page_number - 1]
+    if page_number > 1:
+        print(f"目标分P：第 {page_number} P（cid={target_page.get('cid')}）")
+
     print("正在获取B站播放接口签名...")
     nav_response = _get_with_retries(
         session,
@@ -174,7 +193,7 @@ def _download_bilibili_via_wbi(file_id, output_dir, *, direct=True):
     query = _sign_wbi_params(
         {
             "bvid": file_id,
-            "cid": pages[0]["cid"],
+            "cid": target_page["cid"],
             "qn": 64,  # 720P; broadly available without requiring an account
             "fnval": 0,  # request one directly playable MP4 instead of DASH tracks
             "fourk": 0,
@@ -195,8 +214,10 @@ def _download_bilibili_via_wbi(file_id, output_dir, *, direct=True):
     if len(durls) != 1:
         raise RuntimeError("该视频返回多个媒体分段，暂不支持兜底直连下载")
 
-    title = pages[0].get("part") or file_id
-    safe_title = re.sub(r'[\\\\/:*?"<>|]+', "_", title).strip() or file_id
+    title = target_page.get("part") or file_id
+    if page_number > 1:
+        title = f"{title}_P{page_number}"
+    safe_title = safe_filename(title, fallback=file_id)
     output_path = os.path.join(output_dir, f"{safe_title}.mp4")
     temporary_path = f"{output_path}.part"
     expected_size = durls[0].get("size")
@@ -240,94 +261,112 @@ def _has_complete_video(output_dir):
             print(f"已有视频不完整，将重新下载: {path}")
     return False
 
-def _detect_source(link_or_bv: str):
-    """简单判断来源，返回(source, identifier, url)。"""
-    if link_or_bv.startswith("http"):
-        if "bilibili.com" in link_or_bv:
-            matches = re.findall(r'BV[A-Za-z0-9]+', link_or_bv)
-            if matches:
-                return "bilibili", matches[0], f"https://www.bilibili.com/video/{matches[0]}"
-        if "youtube.com" in link_or_bv or "youtu.be" in link_or_bv:
-            # 尝试提取 YouTube 视频 ID
-            parsed = urlparse(link_or_bv)
-            video_id = None
-            if "youtu.be" in parsed.netloc:
-                video_id = parsed.path.strip("/")
-            else:
-                qs = parse_qs(parsed.query)
-                video_id = (qs.get("v") or [None])[0]
-            if video_id:
-                return "youtube", f"yt_{video_id}", link_or_bv
-            # 没拿到 ID 也允许下载，使用完整链接
-            return "youtube", "yt_video", link_or_bv
-        # 其他站点仍用 yt-dlp 下载
-        return "generic", "video", link_or_bv
-    # 非链接，尝试按 BV 处理
-    if not link_or_bv.startswith("BV"):
-        link_or_bv = "BV" + link_or_bv
-    return "bilibili", link_or_bv, f"https://www.bilibili.com/video/{link_or_bv}"
+_UA_DESKTOP = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+_YTDLP_COMMAND = None
 
 
-def download_video(link_or_bv):
-    """
-    下载视频（B站/YouTube/其他支持的站点）。
-    参数:
-        link_or_bv: 视频链接或BV号
-    返回:
-        成功时返回文件标识符（用于后续音频处理），失败时返回None
-    """
-    source, file_id, video_url = _detect_source(str(link_or_bv))
-    output_dir = f"bilibili_video/{file_id}"  # 统一放在 bilibili_video 下，便于后续处理
-    ensure_folders_exist(output_dir)
-    if source == "bilibili" and _has_complete_video(output_dir):
-        return file_id
-    print(f"使用yt-dlp下载视频: {video_url}")
+def _ytdlp_command():
+    """优先用 PATH 里的 yt-dlp；找不到时退回当前解释器的 yt_dlp 模块。"""
+    global _YTDLP_COMMAND
+    if _YTDLP_COMMAND:
+        return _YTDLP_COMMAND
+    executable = shutil.which("yt-dlp")
+    if executable:
+        _YTDLP_COMMAND = [executable]
+    else:
+        _YTDLP_COMMAND = [sys.executable, "-m", "yt_dlp"]
+    return _YTDLP_COMMAND
+
+
+def _expand_short_link(url):
+    """跟随 302 跳转拿到真实视频页地址；失败返回 None，交由 yt-dlp 自行处理。"""
+    last_error = None
+    for direct in (True, False):
+        session = requests.Session()
+        session.trust_env = not direct
+        try:
+            response = session.get(
+                url,
+                allow_redirects=True,
+                timeout=15,
+                headers={"User-Agent": _UA_DESKTOP, "Accept-Language": "zh-CN,zh;q=0.9"},
+            )
+            response.raise_for_status()
+            return response.url or None
+        except requests.RequestException as error:
+            last_error = error
+        finally:
+            session.close()
+    print(f"短链接解析失败，将直接交给下载器处理: {last_error}")
+    return None
+
+
+def _explain_download_failure(raw_output):
+    """把 yt-dlp 的英文错误翻译成用户能看懂的中文提示。"""
+    text = (raw_output or "").lower()
+    if "unsupported url" in text or "no suitable extractor" in text:
+        return "暂不支持该站点，请确认链接是否来自 B站 / 抖音 / YouTube。"
+    if "private" in text:
+        return "该视频为私密或仅好友可见，无法下载。"
+    if "404" in text or "not found" in text or "does not exist" in text:
+        return "视频不存在、已被删除，或链接已失效。"
+    if "403" in text or "forbidden" in text or "login" in text or "cookies" in text:
+        return "平台拒绝了访问（可能需要登录或存在访问限制），本工具不会绕过权限。"
+    if "timed out" in text or "timeout" in text or "connection" in text:
+        return "网络连接超时，请检查网络后重试。"
+    if "http error 412" in text:
+        return "平台风控拦截（HTTP 412），请稍后重试。"
+    return "下载失败，请检查链接是否有效、网络是否正常。"
+
+
+def _download_with_ytdlp(ref, output_dir):
+    """调用 yt-dlp 下载单个视频；成功返回 True。"""
+    output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
+    arguments = [
+        "-o", output_template,
+        "--no-playlist",
+        "--no-mtime",
+        "--newline",
+        "--progress-delta", "1",
+    ]
+
+    if ref.platform == "bilibili":
+        arguments += [
+            "--proxy", "",  # 直连，避免代理导致的 412 / SSL 错误
+            "--socket-timeout", "20",
+            "--referer", "https://www.bilibili.com",
+            "--add-header", f"User-Agent: {_UA_DESKTOP}",
+        ]
+    elif ref.platform == "youtube":
+        arguments += [
+            "--add-header", f"User-Agent: {_UA_DESKTOP}",
+            "--add-header", "Accept-Language: en-US,en;q=0.5",
+            "--referer", "https://www.youtube.com/",
+            "--extractor-args", "youtube:player_client=android",
+            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "--merge-output-format", "mp4",
+        ]
+    elif ref.platform == "douyin":
+        arguments += [
+            "--socket-timeout", "20",
+            "--referer", "https://www.douyin.com/",
+            "--add-header", f"User-Agent: {_UA_DESKTOP}",
+            "--add-header", "Accept-Language: zh-CN,zh;q=0.9",
+            "-f", "mp4/best",
+            "--merge-output-format", "mp4",
+        ]
+
+    arguments.append(ref.canonical_url)
+
+    print(f"使用 yt-dlp 下载: {ref.canonical_url}")
+    output_lines = []
     try:
-        # yt-dlp命令：-o指定输出路径和文件名，--no-playlist只下载单个视频
-        # 使用%(title)s.%(ext)s作为文件名模板，但会被output_dir覆盖路径部分
-        output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
-        extra_headers = []
-        extractor_args = []
-        
-        if source == "bilibili":
-            extra_headers = [
-                "--proxy", "",  # direct connection; avoids proxy-side 412/SSL errors
-                "--socket-timeout", "20",
-                "--referer", "https://www.bilibili.com",
-                "--add-header", "User-Agent: Mozilla/5.0",
-            ]
-        elif source == "youtube":
-            # 添加 YouTube headers 以避免 403 错误
-            extra_headers = [
-                "--add-header", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "--add-header", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "--add-header", "Accept-Language: en-US,en;q=0.5",
-                "--referer", "https://www.youtube.com/"
-            ]
-            # 使用 android 客户端避免 SABR 流问题和 403 错误
-            # android 客户端通常更稳定，不会触发 YouTube 的 SABR 流限制
-            extractor_args = ["--extractor-args", "youtube:player_client=android"]
-
-        format_args = []
-        if source == "youtube":
-            # 使用更灵活的格式选择，避免触发 SABR 流的格式
-            # 优先选择 android 客户端支持的格式，避免 web 客户端的 SABR 流问题
-            format_args = ["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"]
-
-        # 实时流式输出下载进度，避免界面长时间没有日志刷新、看起来像卡住
-        # --newline 让进度条按行输出，--progress-delta 1 控制每秒最多刷新一次，避免刷屏
         process = subprocess.Popen(
-            [
-                "yt-dlp",
-                "-o", output_template,
-                "--no-playlist",
-                "--newline",
-                "--progress-delta", "1",
-                *extractor_args,
-                *format_args,
-                *extra_headers,
-                video_url,
-            ],
+            [*_ytdlp_command(), *arguments],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -335,53 +374,93 @@ def download_video(link_or_bv):
             errors="replace",
             bufsize=1,
         )
+    except FileNotFoundError:
+        print("错误: 未找到 yt-dlp，请先执行 pip install yt-dlp")
+        return False
+
+    with process:
         for line in iter(process.stdout.readline, ""):
             line = line.rstrip("\n")
-            if line:
-                print(line)
+            if not line:
+                continue
+            print(line)
+            output_lines.append(line)
+            if len(output_lines) > 60:
+                output_lines.pop(0)
         process.stdout.close()
         returncode = process.wait()
 
-        if returncode == 0:
-            # 检查是否真的下载了视频文件
-            video_files = glob.glob(os.path.join(output_dir, "*.mp4"))
-            if not video_files:
-                # 也检查其他视频格式
-                video_files = glob.glob(os.path.join(output_dir, "*.flv"))
-                if not video_files:
-                    video_files = glob.glob(os.path.join(output_dir, "*.mkv"))
-                if not video_files:
-                    video_files = glob.glob(os.path.join(output_dir, "*.webm"))
-            
-            if video_files:
-                print(f"视频已成功下载到目录: {output_dir}")
-                # 删除xml文件和其他不需要的文件
-                xml_files = glob.glob(os.path.join(output_dir, "*.xml"))
-                for xml_file in xml_files:
+    if returncode == 0:
+        for extension in ("mp4", "mkv", "flv", "webm", "m4a"):
+            if glob.glob(os.path.join(output_dir, f"*.{extension}")):
+                print(f"视频已保存到目录: {output_dir}")
+                for extra in glob.glob(os.path.join(output_dir, "*.xml")):
                     try:
-                        os.remove(xml_file)
-                    except:
+                        os.remove(extra)
+                    except OSError:
                         pass
-                return file_id
-            else:
-                print(f"下载完成但未找到视频文件: {output_dir}")
-        else:
-            print(f"yt-dlp下载失败，返回码: {returncode}")
-    except FileNotFoundError:
-        print("错误: 未找到yt-dlp命令。请先安装yt-dlp: pip install yt-dlp")
-    except Exception as e:
-        print("使用yt-dlp下载发生错误:", str(e))
-        import traceback
-        print(traceback.format_exc())
+                return True
+        print(f"下载进程结束但未找到视频文件: {output_dir}")
 
-    if source != "bilibili":
-        return None  # 非B站到这里直接失败
+    print(f"yt-dlp 下载失败（返回码 {returncode}）：{_explain_download_failure(chr(10).join(output_lines))}")
+    return False
 
-    # 网页解析被 412 拦截时，改用带签名的官方播放接口。
-    print("yt-dlp未能下载，切换到WBI播放接口直链下载...")
-    for direct in (True, False):
-        try:
-            return _download_bilibili_via_wbi(file_id, output_dir, direct=direct)
-        except Exception as e:
-            print("WBI直链下载失败:", str(e))
+
+def download_video(link_or_bv, progress=None):
+    """下载视频（B站 / 抖音 / YouTube / 其他 yt-dlp 支持的站点）。
+
+    参数:
+        link_or_bv: 视频链接、分享文案或 BV 号
+        progress: 可选回调，接收阶段描述字符串（供 UI 展示）
+    返回:
+        成功时返回缓存目录名（用于后续音频处理），失败返回 None
+    """
+    notify = progress or (lambda _message: None)
+
+    try:
+        ref = resolve_video_input(str(link_or_bv))
+    except UnsupportedLinkError as error:
+        print(f"链接解析失败: {error}")
+        return None
+
+    if is_short_link(ref.canonical_url):
+        notify("正在解析短链接...")
+        expanded = _expand_short_link(ref.canonical_url)
+        if expanded and expanded != ref.canonical_url:
+            try:
+                ref = resolve_video_input(expanded)
+            except UnsupportedLinkError:
+                print("短链跳转到了无法识别的地址，仍尝试直接下载。")
+
+    print(f"识别结果: {ref.display}")
+    notify(f"识别到{ref.display}")
+
+    output_dir = f"bilibili_video/{ref.cache_key}"
+    ensure_folders_exist(output_dir)
+
+    if ref.page and ref.page > 1:
+        print(f"已保留分P参数：第 {ref.page} P，缓存目录 {output_dir}")
+
+    if _has_complete_video(output_dir):
+        print(f"复用已缓存视频: {output_dir}")
+        return ref.cache_key
+
+    if _download_with_ytdlp(ref, output_dir):
+        return ref.cache_key
+
+    if ref.platform == "bilibili" and not ref.video_id.startswith("short_"):
+        print("yt-dlp 未能下载，切换到 WBI 播放接口直链下载...")
+        notify("切换到备用下载线路...")
+        for direct in (True, False):
+            try:
+                return _download_bilibili_via_wbi(
+                    ref.video_id, output_dir, direct=direct, page=ref.page
+                )
+            except Exception as error:  # noqa: BLE001 - 需要展示具体原因
+                print("WBI 直链下载失败:", str(error))
+        return None
+
+    if ref.platform == "douyin":
+        print("抖音视频下载失败：请确认视频为公开可访问状态，且链接未过期。")
+        print("本工具不会绕过登录、付费或隐私限制。")
     return None
