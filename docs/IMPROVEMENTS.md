@@ -1,6 +1,33 @@
 # Bili2Text Plus 改造说明（docs/IMPROVEMENTS.md）
 
-## 零、分支基线与提交关系
+## V2 增量（分支 `feature/subtitles-and-study-notes`）
+
+在 V1 分支 `feature/douyin-support`（`e647764`）之上新增两个功能，详细设计见
+[V2_DESIGN.md](V2_DESIGN.md)，实测记录见 [V2_TEST_REPORT.md](V2_TEST_REPORT.md)。
+
+| 文件 | 类型 | 说明 |
+| --- | --- | --- |
+| `transcript.py` | 新增 | `TranscriptDocument` 数据契约（schema 2.0）：毫秒时间轴、`source_type`、`time_precision`、ID 稳定性校验、覆盖率评估、原子写入 |
+| `subtitles.py` | 新增 | 字幕发现（B站按目标分P cid / yt-dlp 元数据）、SRT/VTT/B站JSON 解析、三模式选择与回退、完整性校验 |
+| `study_notes.py` | 新增 | 两阶段笔记：AI 只出结构（章节/知识点/引用 ID），程序回填证据；无效引用丢弃、引文不符标待核实、长文分块合并 |
+| `legacy_markdown.py` | 新增 | 旧 `.md` 只读导入：段落引用单元、`unknown` 时间精度、前后哈希一致性保护 |
+| `pipeline.py` | 新增 | 任务目录 `outputs/<task_id>/`、`task_manifest.json`（不含密钥）、原子写入 |
+| `speech2text.py` | 修改 | 抽出 `_collection_slices()` 复用；新增 `run_analysis_timeline()`（近似时间轴）与 `refine_text(source_path=...)`；V1 行为不变 |
+| `window.py` | 修改 | 新增「字幕设置」（获取方式/来源/回退原因）与「智能笔记」分区；其余保持 V1 |
+| `tools/v2_e2e.py` | 新增 | 端到端验收工具（字幕模式/Whisper/旧文档/仅重生成笔记） |
+| `tests/` | 新增 | +68 项（合计 148）：契约、字幕、笔记、旧文档兼容 |
+
+关键取舍：
+
+- **智能模式不使用自动字幕**：需求要求"没有可靠人工字幕就调用 Whisper"，且不允许把自动
+  字幕冒充人工；自动字幕仅在「仅提取字幕」模式下使用并如实标注；
+- **证据一律由程序回填**：AI 返回的 `quote` 只用于一致性判断，不直接采用；
+- **JSON 是事实来源**：`transcript.json` 承载时间轴与来源，Markdown 仅用于展示；
+- **章节细化有界**：仅当"单章覆盖长文"时追加一次重排请求，失败不影响知识点。
+
+---
+
+## 零、V1 分支基线与提交关系
 
 | 项目 | 值 |
 | --- | --- |
