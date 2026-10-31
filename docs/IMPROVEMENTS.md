@@ -1,5 +1,24 @@
 # Bili2Text Plus 改造说明（docs/IMPROVEMENTS.md）
 
+## 零、分支基线与提交关系
+
+| 项目 | 值 |
+| --- | --- |
+| 上游仓库 | `https://github.com/beingaigital/bili2text` |
+| 基线提交 | `92e13ca` *Improve video downloads and ignore generated media*（上游 `main`） |
+| 功能分支 | `feature/douyin-support`，从 `92e13ca` 直接拉出 |
+| 共同祖先 | `92e13ca`（与上游 `main` 一致，无 unrelated-histories 合并） |
+| 改动规模 | 4 个提交，21 个文件，+2567 / −539 |
+
+分支提交顺序：
+
+1. `feat: add Douyin support, fix Bilibili multi-page, generalize LLM config`
+2. `test: add 56 unit tests for parsing, downloads and config`
+3. `docs: document new features, test evidence and configuration`
+4. `chore: add launchers and standalone refinement tooling`
+
+因此 GitHub 上可以直接用 `main...feature/douyin-support` 比较并创建 PR，不会出现"整个仓库都是新增文件"的虚假 diff。
+
 ## 一、与两个项目的关系
 
 - **主项目**：[beingaigital/bili2text](https://github.com/beingaigital/bili2text)（MIT 许可证，Tkinter/ttkbootstrap 桌面版）。本分支以它为基础，保留其全部架构、许可证与版权信息。

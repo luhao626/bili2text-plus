@@ -45,75 +45,131 @@ bili2text 是一个用于将视频（Bilibili、YouTube等）转换为文本的�
 - ✨**AI润色**：使用 MiniMax API 对转写结果进行智能润色，修正错别字、优化断句和表达，生成更精炼的文档。
 
 ## 使用方法 📘
-1. **克隆仓库**：
-   ```bash
-   git clone https://github.com/lanbinleo/bili2text.git
-   cd bili2text
-   ```
 
-2. **安装依赖**：
-   安装必要的 Python 库。
-   ```bash
-   pip install -r requirements.txt
-   ```
+### 环境要求
 
-3. **配置环境变量**（可选，用于AI润色功能）：
-   在项目根目录创建 `.env` 文件，配置 MiniMax API Key：
-   ```bash
-   MINIMAX_APIKEY=your_minimax_api_key_here
-   MINIMAX_MODEL=MiniMax-M3
-   ```
-   
-   如果不配置，将只能生成原始转写文档，无法使用AI润色功能。
+| 依赖 | 版本 / 说明 |
+| --- | --- |
+| Python | 3.10 – 3.12（本项目在 3.10 验证） |
+| FFmpeg | 需要 `ffmpeg` 在 PATH 中（音频提取与合并依赖它） |
+| yt-dlp | 由 `requirements.txt` 安装；若下载失效，可 `pip install -U yt-dlp` |
+| Whisper 模型 | 首次使用会在 `~/.cache/whisper` 自动下载（`small` 约 480MB） |
 
-4. **运行脚本**：
-   使用 Python 运行 `main.py` 脚本。
-   ```python
-   python main.py
-   ```
+### 1. 克隆并安装
 
-   在提示时输入 Bilibili 视频的 av 号。
+```bash
+git clone https://github.com/<你的用户名>/bili2text.git
+cd bili2text
+git checkout feature/douyin-support
+```
 
-5. **使用UI界面**：
-   ```bash
-   python3 window.py
-   ```
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS / Linux
+source .venv/bin/activate
 
-   在弹出的窗口中：
-   - 输入视频链接（支持 Bilibili 和 YouTube 链接）
-   - 点击"加载Whisper"按钮加载模型
-   - 点击"提取视频内容"按钮开始处理，生成原始转写文档
-   - 如需AI润色，点击"AI修订"按钮，将生成润色后的文档（不会覆盖原始文档）
+pip install -r requirements.txt
+```
+
+Windows 上如果 `ffmpeg` 不在 PATH，请从 [ffmpeg.org](https://ffmpeg.org/download.html) 下载后把 `bin` 目录加入 PATH。
+
+### 2. 配置 AI 润色（可选）
+
+不配置也能正常下载与转写，只生成原始 Markdown。需要润色时二选一：
+
+**方式 A：`.env` 文件**（复制 `.env.example` 后填写）
+
+```bash
+cp .env.example .env
+```
+
+```ini
+LLM_API_KEY=你的密钥
+LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+LLM_MODEL=glm-4.7-flash
+```
+
+**方式 B：界面填写**（「AI 润色」区域直接输入，不回显、不写入文件）
+
+> 旧版本变量 `MINIMAX_APIKEY` / `MINIMAX_API_BASE` / `MINIMAX_MODEL` 仍然可用，程序会自动回退读取，因此原有配置无需迁移。`.env` 已在 `.gitignore` 中，不会被提交。
+
+### 3. 启动
+
+Windows 可直接双击 `Bili2Text-Plus.cmd`，或：
+
+```bash
+python window.py
+```
+
+命令行方式（无界面）：
+
+```bash
+python main.py
+```
+
+在提示时输入视频链接或 BV 号。
+
+### 4. 界面操作流程
+
+1. 在「视频输入」粘贴链接或抖音分享文案，右侧会自动显示识别到的平台（B站 / 抖音 / YouTube）与分P；
+2. 选择 Whisper 模型，点击「加载模型」；
+3. 点击「开始转写」，等待下载 → 音频切分 → 转写完成，原始 Markdown 写入输出目录；
+4. 需要润色时点击「AI 修订」，生成 `*_refined.md`（**永不覆盖原始文件**）；
+5. 结果区可预览文本、查看完整路径、打开文件 / 文件夹、复制结果。
+
+### 5. 运行测试
+
+```bash
+python -m unittest discover -s tests
+```
+
+56 个单元测试全部使用 mock，不访问任何视频平台。
+
+### 6. 输出文件位置
+
+默认在项目根目录的 `outputs/`：
+
+```
+outputs/
+  20261031133846.md            # 原始转写
+  20261031133846_refined.md    # AI 润色版（同名前缀 + _refined）
+```
+
+媒体缓存分别在 `bilibili_video/<缓存键>/` 与 `audio/`，均已被 `.gitignore` 排除。
 
 ## 示例 📋
-```python
-from downBili import download_video
-from exAudio import *
-from speech2text import *
 
-av = input("请输入av号：")
-filename = download_video(av)
-foldername = run_split(filename)
-run_analysis(foldername, prompt="以下是普通话的句子。这是一个关于{}的视频。".format(filename))
-output_path = f"outputs/{foldername}.txt"
-print("转换完成！", output_path)
+```python
+from exAudio import process_audio_split
+from speech2text import load_whisper, run_analysis, refine_text
+from utils import download_video
+
+url = "https://www.bilibili.com/video/BV1vwME6AEpd?p=33"
+cache_key = download_video(url)            # -> BV1vwME6AEpd_p33
+folder = process_audio_split(cache_key)    # 提取并切分音频
+load_whisper("small")
+run_analysis(folder, prompt="以下是普通话的句子。")
+refine_text(folder)                        # 生成 outputs/<folder>_refined.md
 ```
 
 ## 技术栈 🧰
 - [Python](https://www.python.org/) 主要编程语言，负责实现程序逻辑功能
 - [Whisper](https://github.com/openai/whisper) 语音转文字模型
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) 视频下载工具，支持 Bilibili、YouTube 等多种平台
-- [MiniMax](https://platform.minimaxi.com/) AI润色服务，提供智能文本润色功能
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) 视频下载工具，支持 Bilibili、抖音、YouTube 等多种平台
+- [智谱 GLM](https://open.bigmodel.cn/) / [MiniMax](https://platform.minimaxi.com/) / 任意 OpenAI 兼容接口，提供 AI 润色
 - [Tkiner](https://docs.python.org/3/library/tkinter.html) UI界面展示相关工具
 - [TTKbootstrap](https://ttkbootstrap.readthedocs.io/en/latest/zh/) UI界面美化库
 
 ## 功能特点 ✨
 
 ### 视频下载
-- ✅ 支持 Bilibili 视频下载（BV号或完整链接）
+- ✅ 支持 Bilibili 视频下载（BV号或完整链接，`?p=` 分P精确区分）
+- ✅ 支持抖音视频下载（网页链接、App 分享文案、短链）
 - ✅ 支持 YouTube 视频下载
 - ✅ 优先下载 MP4 格式，确保兼容性
-- ✅ 自动处理多P视频
+- ✅ 自动处理多P视频，每个分P使用独立缓存，互不覆盖
 
 ### 文本转写
 - ✅ 使用 Whisper 模型进行高精度语音转文字
@@ -122,10 +178,10 @@ print("转换完成！", output_path)
 - ✅ 生成 Markdown 格式的原始转写文档
 
 ### AI润色
-- ✅ 使用 MiniMax API 进行智能润色
-- ✅ 修正错别字、优化断句和表达
-- ✅ 保持原意的前提下提升文本质量
-- ✅ 润色文档独立保存，不覆盖原始文档
+- ✅ 支持智谱 GLM（含免费 `glm-4.7-flash`）、MiniMax 或任意 OpenAI 兼容接口
+- ✅ 界面可切换服务商并「测试连接」，错误分类为中文提示
+- ✅ 自动关闭思考模式、429 限流重试、重复尾部清理，避免空输出
+- ✅ 润色文档独立保存为 `*_refined.md`，不覆盖原始文档
 
 ## 后续开发计划 📅
 
