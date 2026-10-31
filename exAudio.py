@@ -17,15 +17,21 @@ def check_video_integrity(file_path):
         return False
     return True
 
+AUDIO_EXTS = ('.mp3', '.m4a', '.wav', '.aac', '.flac', '.ogg', '.opus', '.wma')
+
+
 def convert_flv_to_mp3(name, target_name=None, folder='bilibili_video'):
     # 先尝试直接拼接 .mp4
     input_path = f'{folder}/{name}.mp4'
     if not os.path.exists(input_path):
-        # 如果不存在，尝试在文件夹下查找视频文件
+        # 如果不存在，尝试在文件夹下查找视频（或纯音频）文件
         dir_path = f'{folder}/{name}'
         if os.path.isdir(dir_path):
             # 按格式优先级选择，避免旧的损坏 webm 被选中
-            priority_exts = ['.mp4', '.m4v', '.mov', '.mkv', '.flv', '.webm', '.avi']
+            priority_exts = [
+                '.mp4', '.m4v', '.mov', '.mkv', '.flv', '.webm', '.avi',
+                '.mp3', '.m4a', '.wav', '.aac', '.flac', '.ogg', '.opus', '.wma',
+            ]
             found = None
             for ext in priority_exts:
                 for file in os.listdir(dir_path):
@@ -36,10 +42,13 @@ def convert_flv_to_mp3(name, target_name=None, folder='bilibili_video'):
                     input_path = found
                     break
             if not found:
-                raise FileNotFoundError(f"目录下未找到视频文件: {dir_path}")
+                raise FileNotFoundError(f"目录下未找到视频/音频文件: {dir_path}")
         else:
             raise FileNotFoundError(f"视频文件不存在: {input_path}")
+    is_audio_only = input_path.lower().endswith(AUDIO_EXTS)
     if not check_video_integrity(input_path):
+        if is_audio_only:
+            raise ValueError(f"音频文件损坏: {input_path}")
         # 尝试重新封装为 mp4，再校验一次
         remux_path = os.path.splitext(input_path)[0] + "_remux.mp4"
         try:
@@ -56,12 +65,19 @@ def convert_flv_to_mp3(name, target_name=None, folder='bilibili_video'):
                 raise ValueError(f"视频文件损坏: {input_path}")
         except Exception:
             raise ValueError(f"视频文件损坏: {input_path}")
-    # 提取视频中的音频并保存为 MP3 到 audio/conv 目录
-    clip = VideoFileClip(input_path)
-    audio = clip.audio
+    # 提取音频并保存为 MP3 到 audio/conv 目录；纯音频文件直接转码
     os.makedirs("audio/conv", exist_ok=True)
     output_name = target_name if target_name else name
-    audio.write_audiofile(f"audio/conv/{output_name}.mp3")
+    if is_audio_only:
+        AudioSegment.from_file(input_path).export(
+            f"audio/conv/{output_name}.mp3", format="mp3"
+        )
+        return
+    clip = VideoFileClip(input_path)
+    try:
+        clip.audio.write_audiofile(f"audio/conv/{output_name}.mp3")
+    finally:
+        clip.close()
 
 def split_mp3(filename, folder_name, slice_length=45000, target_folder="audio/slice"):
     audio = AudioSegment.from_mp3(filename)

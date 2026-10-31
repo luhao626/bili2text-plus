@@ -52,6 +52,47 @@ class CacheIsolationTests(unittest.TestCase):
         self.assertIsNone(utils.download_video("这不是链接 !!!"))
 
 
+class LocalMediaImportTests(unittest.TestCase):
+    """本地文件兜底：不联网也能把文件接入缓存目录，且不改动原文件。"""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.source = os.path.join(self.tmp.name, "样例视频.mp4")
+        with open(self.source, "wb") as handle:
+            handle.write(b"fake-mp4-bytes" * 4)
+        self.workdir = os.path.join(self.tmp.name, "work")
+        os.makedirs(self.workdir)
+        self._old_cwd = os.getcwd()
+        os.chdir(self.workdir)
+        self.addCleanup(os.chdir, self._old_cwd)
+
+    def test_local_file_is_imported_into_cache(self):
+        cache_key = utils.download_video(self.source)
+        self.assertIsNotNone(cache_key)
+        imported = os.path.join("bilibili_video", cache_key, "样例视频.mp4")
+        self.assertTrue(os.path.exists(imported))
+        self.assertEqual(os.path.getsize(imported), os.path.getsize(self.source))
+
+    def test_original_file_is_not_modified(self):
+        before = open(self.source, "rb").read()
+        utils.download_video(self.source)
+        self.assertEqual(open(self.source, "rb").read(), before)
+
+    def test_second_run_reuses_imported_file(self):
+        cache_key = utils.download_video(self.source)
+        imported = os.path.join("bilibili_video", cache_key, "样例视频.mp4")
+        os.remove(imported)  # 模拟缓存被清理
+        second = utils.download_video(self.source)
+        self.assertEqual(cache_key, second)
+        self.assertTrue(os.path.exists(imported))
+
+    def test_missing_local_file_returns_none(self):
+        self.assertIsNone(utils.download_video(os.path.join(self.tmp.name, "无此文件.mp4")))
+
+
 class WbiPageSelectionTests(unittest.TestCase):
     def test_missing_page_gives_clear_error(self):
         """分P越界时，应给出包含总P数的中文错误，而不是悄悄下第一P。"""

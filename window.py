@@ -1,11 +1,12 @@
 """Bili2Text Plus 桌面界面。
 
 与原版相比的主要变化：
-1. 输入区自动识别平台（B站 / 抖音 / YouTube），并支持直接粘贴抖音分享文案；
+1. 输入区自动识别平台（B站 / 抖音 / YouTube / 本地文件），并支持直接粘贴抖音分享文案；
 2. 转写配置、AI 润色配置、结果管理分区展示；
 3. 所有耗时任务在后台线程执行，界面更新统一回到主线程（队列轮询），避免假死；
 4. 结果区可预览文本、查看完整路径、打开文件夹、打开文件、复制内容；
-5. AI 润色支持服务商切换与「测试连接」，并可对已有 Markdown 直接润色。
+5. AI 润色支持服务商切换与「测试连接」，并可对已有 Markdown 直接润色；
+6. 平台封掉命令行直连时（如抖音 2026-09 起），可「选择文件…」直接转写本地视频/音频。
 """
 
 from __future__ import annotations
@@ -411,6 +412,24 @@ def on_pick_markdown() -> None:
     append_log(f"[选择] 已载入：{path}")
 
 
+def on_pick_local_media() -> None:
+    """选择本地视频/音频文件，供平台拒绝命令行访问时兜底使用。"""
+    path = filedialog.askopenfilename(
+        title="选择本地视频或音频文件",
+        filetypes=[
+            ("视频文件", "*.mp4 *.m4v *.mov *.mkv *.flv *.webm *.avi *.ts *.wmv"),
+            ("音频文件", "*.mp3 *.m4a *.wav *.aac *.flac *.ogg *.opus *.wma"),
+            ("所有文件", "*.*"),
+        ],
+    )
+    if not path:
+        return
+    link_entry.delete(0, END)
+    link_entry.insert(0, path)
+    refresh_platform_hint()
+    append_log(f"[选择] 本地文件：{path}")
+
+
 def on_pick_output_dir() -> None:
     path = filedialog.askdirectory(title="选择 Markdown 保存目录")
     if not path:
@@ -494,7 +513,7 @@ def build_ui(selftest: bool = False) -> None:
     ttk.Label(header, text="Bili2Text Plus", font=("Microsoft YaHei UI", 18, "bold")).pack(side=LEFT)
     ttk.Label(
         header,
-        text="B站 / 抖音 / YouTube · Whisper 转写 · AI 润色",
+        text="B站 / 抖音 / YouTube / 本地文件 · Whisper 转写 · AI 润色",
         bootstyle="secondary",
     ).pack(side=LEFT, padx=12)
 
@@ -506,6 +525,10 @@ def build_ui(selftest: bool = False) -> None:
     link_entry = ttk.Entry(row)
     link_entry.pack(side=LEFT, fill=X, expand=YES)
     link_entry.bind("<KeyRelease>", refresh_platform_hint)
+    pick_local_button = ttk.Button(
+        row, text="选择文件…", bootstyle="secondary-outline", command=on_pick_local_media
+    )
+    pick_local_button.pack(side=LEFT, padx=6)
     start_button = ttk.Button(row, text="开始转写", bootstyle="primary", command=on_start)
     start_button.pack(side=LEFT, padx=6)
     stop_button = ttk.Button(row, text="停止", bootstyle="danger-outline", command=on_stop, state="disabled")

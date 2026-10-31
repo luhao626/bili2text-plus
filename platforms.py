@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -23,7 +24,18 @@ PLATFORM_LABELS = {
     "douyin": "抖音",
     "youtube": "YouTube",
     "generic": "其他站点",
+    "local": "本地文件",
 }
+
+# 本地文件兜底：抖音等平台在 2026-09 后封掉了命令行直连，
+# 用户可在浏览器里正常下载视频后，直接把文件交给本工具转写。
+LOCAL_VIDEO_EXTS = (
+    ".mp4", ".m4v", ".mov", ".mkv", ".flv", ".webm", ".avi", ".ts", ".wmv",
+)
+LOCAL_AUDIO_EXTS = (
+    ".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma",
+)
+LOCAL_MEDIA_EXTS = LOCAL_VIDEO_EXTS + LOCAL_AUDIO_EXTS
 
 # 域名白名单：必须与主机名精确匹配，或作为子域出现
 BILIBILI_HOSTS = ("bilibili.com", "b23.tv")
@@ -213,11 +225,56 @@ def _generic_ref(url: str) -> VideoRef:
     )
 
 
+def strip_wrapping_quotes(text: str) -> str:
+    """去掉资源管理器「复制为路径」时带上的外层引号。"""
+    text = (text or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1].strip()
+    return text
+
+
+def looks_like_local_media(text: str) -> bool:
+    """判断输入是不是本地媒体文件路径（而不是链接或 BV 号）。"""
+    candidate = strip_wrapping_quotes(text)
+    if not candidate or "://" in candidate:
+        return False
+    lowered = candidate.lower()
+    if not lowered.endswith(LOCAL_MEDIA_EXTS):
+        return False
+    # 排除 "abc.mp4" 这类只是恰好以扩展名结尾的裸词：必须能定位到文件
+    return os.path.exists(candidate) or ("/" in candidate or "\\" in candidate)
+
+
+def _local_ref(path: str) -> VideoRef:
+    absolute = os.path.abspath(os.path.expanduser(strip_wrapping_quotes(path)))
+    if not os.path.exists(absolute):
+        raise UnsupportedLinkError(f"本地文件不存在：{absolute}")
+    if not os.path.isfile(absolute):
+        raise UnsupportedLinkError(f"这是一个文件夹，请选择具体的视频/音频文件：{absolute}")
+
+    name = os.path.basename(absolute)
+    stem = os.path.splitext(name)[0]
+    digest = hashlib.sha1(absolute.lower().encode("utf-8")).hexdigest()[:8]
+    # 同名不同路径的文件不能共用缓存目录，因此用路径哈希做后缀
+    cache_key = f"local_{safe_filename(stem, max_length=48)}_{digest}"
+    return VideoRef(
+        platform="local",
+        video_id=name,
+        canonical_url=absolute,
+        cache_key=cache_key,
+        title_hint=stem,
+    )
+
+
 def resolve_video_input(raw_input: str) -> VideoRef:
     """把用户输入（链接 / 分享文案 / 裸 BV 号）解析成 VideoRef。"""
     text = (raw_input or "").strip()
     if not text:
-        raise UnsupportedLinkError("请输入视频链接，或粘贴抖音分享文案。")
+        raise UnsupportedLinkError("请输入视频链接、本地文件路径，或粘贴抖音分享文案。")
+
+    # 本地文件（含「复制为路径」带上引号、拖拽进来的绝对路径）
+    if looks_like_local_media(text):
+        return _local_ref(text)
 
     url = extract_url(text)
     if url:
@@ -256,7 +313,8 @@ def resolve_video_input(raw_input: str) -> VideoRef:
 
     raise UnsupportedLinkError(
         "没有识别到可用的视频链接。支持 B站、抖音、YouTube 链接，"
-        "也可以直接输入 BV 号，或粘贴抖音 App 的分享文案。"
+        "也可以直接输入 BV 号、粘贴抖音 App 的分享文案，"
+        "或直接给出本地视频/音频文件路径。"
     )
 
 

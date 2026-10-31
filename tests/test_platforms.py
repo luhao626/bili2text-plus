@@ -131,6 +131,71 @@ class DouyinInvalidPageTests(unittest.TestCase):
         self.assertEqual(ref.cache_key, "dy_7296829101289123123")
 
 
+class LocalFileTests(unittest.TestCase):
+    """平台封掉命令行直连时，本地文件是唯一的兜底入口。"""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.video = os.path.join(self.tmp.name, "抖音 测试视频.mp4")
+        with open(self.video, "wb") as handle:
+            handle.write(b"\x00" * 32)
+        self.audio = os.path.join(self.tmp.name, "audio-clip.m4a")
+        with open(self.audio, "wb") as handle:
+            handle.write(b"\x00" * 16)
+
+    def test_absolute_video_path(self):
+        ref = resolve_video_input(self.video)
+        self.assertEqual(ref.platform, "local")
+        self.assertEqual(ref.video_id, "抖音 测试视频.mp4")
+        self.assertEqual(os.path.abspath(self.video), ref.canonical_url)
+        self.assertTrue(ref.cache_key.startswith("local_"))
+
+    def test_audio_path_supported(self):
+        ref = resolve_video_input(self.audio)
+        self.assertEqual(ref.platform, "local")
+
+    def test_quoted_path_from_explorer(self):
+        """资源管理器「复制为路径」会带双引号。"""
+        ref = resolve_video_input(f'"{self.video}"')
+        self.assertEqual(ref.platform, "local")
+        self.assertEqual(os.path.abspath(self.video), ref.canonical_url)
+
+    def test_same_name_different_path_does_not_share_cache(self):
+        other_dir = os.path.join(self.tmp.name, "sub")
+        os.makedirs(other_dir)
+        other = os.path.join(other_dir, "抖音 测试视频.mp4")
+        with open(other, "wb") as handle:
+            handle.write(b"\x00" * 8)
+        first = resolve_video_input(self.video)
+        second = resolve_video_input(other)
+        self.assertNotEqual(first.cache_key, second.cache_key)
+
+    def test_missing_file_raises_friendly_error(self):
+        with self.assertRaises(UnsupportedLinkError) as ctx:
+            resolve_video_input(os.path.join(self.tmp.name, "not-there.mp4"))
+        self.assertIn("本地文件不存在", str(ctx.exception))
+
+    def test_directory_is_rejected(self):
+        folder = os.path.join(self.tmp.name, "folder.mp4")
+        os.makedirs(folder)
+        with self.assertRaises(UnsupportedLinkError) as ctx:
+            resolve_video_input(folder)
+        self.assertIn("文件夹", str(ctx.exception))
+
+    def test_bare_filename_without_file_is_not_treated_as_path(self):
+        """仅输入 video.mp4 且文件不存在时，应提示找不到链接而不是报本地文件。"""
+        with self.assertRaises(UnsupportedLinkError) as ctx:
+            resolve_video_input("video.mp4")
+        self.assertIn("没有识别到可用的视频链接", str(ctx.exception))
+
+    def test_display_uses_local_label(self):
+        ref = resolve_video_input(self.video)
+        self.assertIn("本地文件", ref.display)
+
+
 class HelperTests(unittest.TestCase):
     def test_extract_url_from_chinese_share_text(self):
         text = "看看这个 https://v.douyin.com/iRNBho6u/，超级好用！"

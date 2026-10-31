@@ -12,17 +12,17 @@
 
 | 测试文件 | 用例数 | 覆盖内容 |
 | --- | --- | --- |
-| `tests/test_platforms.py` | 26 | B站 URL/BV/av/分P/短链、抖音分享文案与视频 ID、**抖音首页/话题页应报错**、YouTube、伪装域名、缓存键隔离、安全文件名 |
+| `tests/test_platforms.py` | 34 | B站 URL/BV/av/分P/短链、抖音分享文案与视频 ID、**抖音首页/话题页应报错**、YouTube、伪装域名、缓存键隔离、安全文件名、**本地文件路径（含引号/音频/同名不同路径/缺失文件/目录拒绝）** |
 | `tests/test_llm_config.py` | 18 | 配置优先级（UI > LLM_* > MINIMAX_*）、服务商预设、密钥脱敏、错误分类、思考模式开关 |
-| `tests/test_utils_download.py` | 14 | yt-dlp 错误翻译、缓存隔离、WBI 分P越界报错（mock API）、**Cookie 参数默认关闭**、**短链未解析时不下载首页**、非法输入不发起网络请求 |
+| `tests/test_utils_download.py` | 18 | yt-dlp 错误翻译、缓存隔离、WBI 分P越界报错（mock API）、**Cookie 参数默认关闭**、**短链未解析时不下载首页**、非法输入不发起网络请求、**本地文件接入/原文件不变/二次复用** |
 | `tests/test_speech2text_units.py` | 8 | 分块与 token 估算、重复尾部清理、无 Key 报错、空内容防护、输出目录切换 |
 
-**结果：66 / 66 通过（`OK`，耗时 0.78s）。** 全部使用 mock，不访问真实平台。
+**结果：78 / 78 通过（`OK`）。** 全部使用 mock，不访问真实平台。
 
 执行原始输出：
 
 ```
-Ran 66 tests in 0.779s
+Ran 78 tests in 0.942s
 
 OK
 ```
@@ -80,11 +80,44 @@ OK
 
 **同时确认的平台约束（非本项目缺陷）：** yt-dlp 的抖音提取器目前要求 `Fresh cookies`，即使是公开视频。因此新增**可选**配置 `YTDLP_COOKIES_FROM_BROWSER=edge|chrome|firefox` 或 `YTDLP_COOKIE_FILE`，把用户自己浏览器里本来就能正常观看的会话交给 yt-dlp；**默认关闭**，不配置时行为与之前完全一致，也不涉及任何绕过登录/付费/隐私限制的手段。
 
+### 2.4 抖音真实视频下载尝试（2026-10-31，使用真实公开链接 + 真实 cookies）
+
+被测链接：`https://www.douyin.com/video/7689305777282415962`（用户提供，公开可播放）
+
+| 步骤 | 实际操作 | 结果 |
+| --- | --- | --- |
+| 链接解析 | `resolve_video_input()` | ✅ `platform=douyin` `video_id=7689305777282415962` `cache_key=dy_7689305777282415962` |
+| 无 cookies 直连 | `yt-dlp` | ❌ `HTTP Error 403` → `Fresh cookies (not necessarily logged in) are needed` |
+| 读取 Edge cookies | `YTDLP_COOKIES_FROM_BROWSER=edge` | ❌ Edge 运行中：`Could not copy Chrome cookie database`（数据库被锁） |
+| 关闭 Edge 后重试 | 同上 | ❌ `Failed to decrypt with DPAPI`（App-Bound Encryption，yt-dlp issue #10927） |
+| 读取 Chrome cookies | `YTDLP_COOKIES_FROM_BROWSER=chrome` | ❌ 同样 DPAPI 失败（新版 Chromium 系浏览器已启用应用绑定加密，外部程序无法解密） |
+| 用户导出 cookies.txt | Cookie-Editor 导出 Netscape 格式，36 条抖音 cookies（含 `ttwid`、`s_v_web_id`、`passport_csrf_token`），`YTDLP_COOKIE_FILE` 注入 | ❌ 仍为 `HTTP Error 403`（详情接口拒绝） |
+| yt-dlp nightly | `2026.10.21.202512`（临时目录安装，未改动项目环境） | ❌ 同上，非版本问题 |
+| 交叉验证另两个公开视频 | `7525709501892644132`、`7531942590553673012` | ❌ 两个都 `HTTP Error 403` |
+| 页面可访问性 | `curl` 带 cookies + 浏览器 UA | ⚠️ `HTTP 200`、72,914 字节，但页面不含 `_ROUTER_DATA`/`aweme` 数据（纯 JS 壳），视频数据只能由浏览器内签名请求获取 |
+
+**结论：抖音自 2026 年起对非浏览器访问收紧风控，命令行直连（含有效性 cookies）会被详情接口拒绝。** 这与链接是否有效、cookies 是否配置无关，属于平台侧限制；本项目**不构造签名参数绕过**风控。据此新增「本地文件兜底」：用户在浏览器里正常下载视频后，用本地文件路径即可完成转写（见 2.5）。
+
+### 2.5 本地文件兜底：完整流程实测
+
+测试素材：从已下载的 B站 p=33 视频截取 60 秒（`local_e2e_60s.mp4`，3,296,948 字节，真实音轨），模拟"浏览器下载抖音视频后交给本工具"的场景。
+
+| 步骤 | 观察到的结果 |
+| --- | --- |
+| 路径解析 | `platform=local` `cache_key=local_local_e2e_60s_3c446df1`，`display=本地文件 · local_e2e_60s.mp4` |
+| 缓存接入 | 在 `bilibili_video/local_local_e2e_60s_3c446df1/` 下以**硬链接**接入（`ls -l` 链接数为 2，无额外磁盘占用） |
+| 原文件保护 | 源文件 SHA256 前 16 位 `70f7c645ba609fb4`、大小 3,296,948 字节，转写前后一致，未被修改 |
+| 音频切分 | 45s 一片，共 2 个切片 |
+| Whisper small | 全流程 **57.0s**（含模型加载），生成 `outputs/20261031155014.md`（348 字符） |
+| 输出正确性 | 内容与源视频前 60 秒语音一致（"来这回进入到我们的底吧模式…"），与 2.1 的完整版开头吻合 |
+| 界面兼容 | `python window.py --selftest` 退出码 **0**，新增「选择文件…」按钮正常构建 |
+
 ## 三、未验证项（如实说明）
 
 | 项目 | 原因 | 状态 |
 | --- | --- | --- |
-| 抖音**成功**下载 + 转写 | 尚未获得指定的公开视频链接；且 yt-dlp 抖音提取器当前要求浏览器 Cookie（见 2.3） | ⏸ 失败路径已验证，成功路径未验证 |
+| 抖音**在线链接**成功下载 | 平台侧拦截：真实链接 + 有效 cookies + nightly 版本 + 另两个公开视频均返回 403（详见 2.4） | ❌ 无法验证（平台限制，已提供本地文件兜底） |
+| 抖音**本地文件**转写 | 用真实 60 秒素材完成下载替代路径全流程（详见 2.5） | ✅ 已验证 |
 | YouTube 完整下载 + 转写 | 仅验证了元数据可获取；未实际下载并转写 | ⏸ 部分验证 |
 | MiniMax 真实调用 | 为避免产生费用，未调用付费模型 | ⏸ 未验证（仅保留兼容代码与预设，错误分类有单元测试） |
 | Windows EXE 打包 | PyInstaller 未安装，且需用户同意后安装 | ⏸ 未执行 |
@@ -92,9 +125,11 @@ OK
 
 ## 四、已知限制
 
-- 抖音：yt-dlp 当前要求 `Fresh cookies`，未配置 `YTDLP_COOKIES_FROM_BROWSER` 时公开视频也可能下载失败，程序会给出中文提示，**不会尝试绕过**访问控制；
+- 抖音**在线链接**：平台自 2026 年起拒绝非浏览器访问，实测有效 cookies 也无法通过（2.4）。程序会给出中文提示并**引导改用本地文件**，「选择文件…」入口可完成同样的转写流程；
+- 浏览器 cookies 读取：新版 Chrome / Edge 启用了 App-Bound Encryption，`--cookies-from-browser` 在 Windows 上普遍失败（yt-dlp issue #10927），需要用户用扩展导出 `cookies.txt`；即便如此，抖音仍可能返回 403；
 - 短时间内连续调用免费模型（`glm-4.7-flash`）可能连续 429，程序最多自动重试 3 次（10s / 20s 退避），仍失败需稍后重试；
 - 抖音短链解析依赖网络可达 `v.douyin.com`；短链 404 不再被误当作视频下载，会直接报错；
+- 本地文件兜底依赖硬链接：跨磁盘时会退回复制（大文件会多占一份空间），原文件始终不会被修改；
 - 本机访问 GitHub / YouTube 需经系统代理 `127.0.0.1:7897`，直连被阻断（属网络环境限制，与程序无关）。
 
 ## 五、复现方式
