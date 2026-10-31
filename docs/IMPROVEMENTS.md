@@ -8,14 +8,17 @@
 | 基线提交 | `92e13ca` *Improve video downloads and ignore generated media*（上游 `main`） |
 | 功能分支 | `feature/douyin-support`，从 `92e13ca` 直接拉出 |
 | 共同祖先 | `92e13ca`（与上游 `main` 一致，无 unrelated-histories 合并） |
-| 改动规模 | 4 个提交，21 个文件，+2567 / −539 |
+| 改动规模 | 21 个文件，+2858 / −595（`git diff --shortstat upstream/main...HEAD`） |
 
 分支提交顺序：
 
 1. `feat: add Douyin support, fix Bilibili multi-page, generalize LLM config`
-2. `test: add 56 unit tests for parsing, downloads and config`
+2. `test: add 56 unit tests for parsing, downloads and config`（后续修复补充到 66）
 3. `docs: document new features, test evidence and configuration`
 4. `chore: add launchers and standalone refinement tooling`
+5. `docs: update install guide and record real end-to-end evidence`
+6. `fix: reject Douyin URLs without a video id, add optional browser cookies`
+7. `docs: document optional cookie configuration in .env.example`
 
 因此 GitHub 上可以直接用 `main...feature/douyin-support` 比较并创建 PR，不会出现"整个仓库都是新增文件"的虚假 diff。
 
@@ -36,7 +39,7 @@
 | `llm_config.py` | 新增 | 通用 LLM 配置层（LLM_* 优先，兼容 MINIMAX_*）；密钥脱敏；错误分类（鉴权/模型/限流/过载/欠费/网络）；`test_connection()` 连通测试 |
 | `speech2text.py` | 增强 | 接入 llm_config；自动关闭思考模式；429/5xx 自动重试；动态输出上限；重复尾部清理；空结果拒绝写盘；可自定义输出目录 |
 | `window.py` | 重构 | 四分区界面、平台实时识别、AI 配置与测试、结果预览/路径/打开/复制、线程安全日志、高分屏 DPI 适配、选择已有 Markdown 润色 |
-| `tests/` | 新增 | 56 个单元测试（unittest 编写，兼容 pytest 收集），全部 mock，不依赖网络 |
+| `tests/` | 新增 | 66 个单元测试（unittest 编写，兼容 pytest 收集），全部 mock，不依赖网络 |
 | `tools/capture_ui.py` | 新增 | 主窗口截图工具（用于文档） |
 | `docs/`、`.env.example` | 新增 | 本文档、测试报告、环境变量示例、界面截图 |
 | `README.md`、`.gitignore` | 更新 | 新增功能说明；忽略规则补充 |
@@ -49,12 +52,18 @@
 ### 2. 平台判定安全
 用域名后缀精确匹配（`bilibili.com` / `douyin.com` / `iesdouyin.com` / `youtube.com` / `youtu.be` / `b23.tv` / `v.douyin.com`），`evilbilibili.com` 这类伪装域名不会误判（有对应单元测试）。不实现绕过登录、付费或隐私限制的功能。
 
-### 3. GLM 免费模型的三个坑
+### 3. 抖音的两条边界处理
+
+- **无效短链不能当视频下载**：短链 404 会跳到抖音首页，原实现会把首页交给下载器；现在短链展开后若仍拿不到具体视频 ID，直接给出中文错误并中止。
+- **缺少视频 ID 的链接直接拒绝**：首页、用户页、话题页等非短链地址一律报错，提示改用 `https://www.douyin.com/video/...`。
+- **Cookie 可选注入**：yt-dlp 的抖音提取器当前要求 `Fresh cookies`（即使视频公开）。新增 `YTDLP_COOKIES_FROM_BROWSER` / `YTDLP_COOKIE_FILE`，仅把你本来就能正常观看的浏览器会话交给 yt-dlp，默认关闭，不做任何绕过。
+
+### 4. GLM 免费模型的三个坑
 1. **默认开启思考模式**：32000 输出预算被推理耗尽，正文为空 → 显式 `thinking: disabled`；
 2. **句子级重复循环**：长文本输出末尾重复同一句话数百遍 → 输出上限按输入长度动态设定 + 重复尾部截断；
 3. **1305 平台过载**：免费模型高峰期 429 → 自动退避重试 3 次，错误分类后给出中文提示。
 
-### 4. 界面线程安全
+### 5. 界面线程安全
 所有后台任务（下载、转写、润色、API 测试）通过 `queue.Queue` 把消息交回主线程消费（`app.after` 轮询），`print` 重定向也走同一队列，避免 Tkinter 跨线程更新导致的假死与崩溃。
 
 ## 四、创新点总结

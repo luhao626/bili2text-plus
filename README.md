@@ -21,7 +21,7 @@
 - 🤖 **通用 AI 润色配置**：支持智谱 GLM / MiniMax / 任意 OpenAI 兼容接口，环境变量 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`（完全兼容旧的 `MINIMAX_*` 变量），界面内可切换并一键「测试连接」
 - 🖥️ **界面重构**：视频输入（含平台识别）、转写配置、AI 润色、结果管理四个分区；支持文本预览、打开文件/文件夹、复制结果；修复高分屏（125%/150%/200% 缩放）下界面被压缩的问题
 - 🛡️ **润色健壮性**：自动关闭思考模式（避免输出为空）、429 限流自动重试、重复内容尾部清理、空结果拒绝落盘
-- ✅ **自动化测试**：56 个单元测试（`python -m unittest discover -s tests`），覆盖链接解析、缓存隔离、错误分类等
+- ✅ **自动化测试**：66 个单元测试（`python -m unittest discover -s tests`），覆盖链接解析、缓存隔离、错误分类等
 
 运行方式与原版一致（`python window.py`），启动界面见 [docs/screenshots/ui-main.png](docs/screenshots/ui-main.png)。
 
@@ -125,7 +125,7 @@ python main.py
 python -m unittest discover -s tests
 ```
 
-56 个单元测试全部使用 mock，不访问任何视频平台。
+66 个单元测试全部使用 mock，不访问任何视频平台。
 
 ### 6. 输出文件位置
 
