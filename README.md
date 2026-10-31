@@ -10,46 +10,132 @@
     <img src="https://img.shields.io/github/v/release/lanbinshijie/bili2text" alt="GitHub release (latest by date)"/>
 </p>
 
-# Bili2text 📺
+# Bili2Text Plus V2｜视频字幕优先与可溯源 AI 智能笔记
 
-## Bili2Text Plus（本分支新增功能）✨
+本项目是在开源 Bili2Text 基础上完成的 Python 课程作业二次开发。
 
-本分支（`feature/douyin-support`）在原版基础上做了以下增强，详细说明见 [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md)，测试记录见 [docs/TEST_REPORT.md](docs/TEST_REPORT.md)：
+原项目提供视频下载、音频提取、Whisper 语音识别和 AI 文本修订能力。
 
-- 🎬 **抖音支持**：直接粘贴抖音分享文案（含中文说明和短链）即可转写，自动提取链接并解析短链跳转
-- 📁 **本地文件兜底**：本机实测抖音链接会被平台接口以 403 拒绝（带有效 cookies 也一样，见测试报告 2.4）。此时可在浏览器里正常下载视频，然后点「选择文件…」或直接粘贴本地路径，转写流程完全一致（支持 mp4/mov/mkv/flv/webm/avi 等视频与 mp3/m4a/wav 等音频）。默认**复制**一份到缓存，**原文件绝不会被修改**；超大文件可设 `BILI2TEXT_LOCAL_IMPORT=hardlink` 改为同盘硬链接（零拷贝，但与原文件共享数据）
-- 🧩 **B站分P修复**：`https://www.bilibili.com/video/BVxxx?p=33` 不再丢失分P参数，每个分P使用独立缓存目录，互不覆盖
-- 🤖 **通用 AI 润色配置**：支持智谱 GLM / MiniMax / 任意 OpenAI 兼容接口，环境变量 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`（完全兼容旧的 `MINIMAX_*` 变量），界面内可切换并一键「测试连接」
-- 🖥️ **界面重构**：视频输入（含平台识别）、转写配置、AI 润色、结果管理四个分区；支持文本预览、打开文件/文件夹、复制结果；修复高分屏（125%/150%/200% 缩放）下界面被压缩的问题
-- 🛡️ **润色健壮性**：自动关闭思考模式（避免输出为空）、429 限流自动重试、重复内容尾部清理、空结果拒绝落盘
-- ✅ **自动化测试**：148 个单元测试（`python -m unittest discover -s tests`），覆盖链接解析、本地文件接入、缓存隔离、错误分类、字幕解析与笔记校验等
+本次改造在保留原有功能的基础上，增加了老师指定的字幕优先功能，以及自主设计的可溯源 AI 学习笔记功能。
 
-运行方式与原版一致（`python window.py`），启动界面见 [docs/screenshots/ui-main.png](docs/screenshots/ui-main.png)。
+**本次作业的完整代码位于：**
 
-## V2：人工字幕优先 · 可溯源智能笔记 ✨
+`feature/subtitles-and-study-notes`
 
-当前分支 `feature/subtitles-and-study-notes` 在上一分支基础上新增两项功能，设计与取舍见 [docs/V2_DESIGN.md](docs/V2_DESIGN.md)，实测记录见 [docs/V2_TEST_REPORT.md](docs/V2_TEST_REPORT.md)：
+[查看 V2 项目代码](https://github.com/luhao626/bili2text-plus/tree/feature/subtitles-and-study-notes)
 
-- 📝 **人工字幕优先，Whisper 兜底**：有可靠人工字幕时直接取字幕生成 Markdown，**不下载视频、不跑 Whisper**；没有可靠字幕时自动回退原有转写流程。三种模式：智能模式 / 强制 Whisper / 仅提取字幕
-  - 严格区分 `human_subtitle`、`automatic_subtitle`、`unknown_subtitle`，自动字幕绝不冒充人工字幕
-  - B站按**目标分P的 cid** 取字幕，`?p=33` 不会误用第 1P 的字幕
-  - 支持 SRT / VTT / B站字幕 JSON，校验空字幕、非法时间码与覆盖率不足
-- 🧠 **可溯源智能笔记**：把转写生成 `study_notes.md`，正文**只有**「章节结构」与「核心知识点」两个栏目
-  - AI 只返回结构（章节 + 知识点 + `segment_id`），**证据文字由程序从原文回填**，不采用 AI 编造的引文
-  - 引用不存在的 ID 直接丢弃；引文与原文不一致时标记「待核实」
-  - 长视频自动分块提取后合并去重，任一块失败会在文件顶部标注"只覆盖部分原文"
-- 📄 **旧 Markdown 也能用**：选择 Bili2Text 以前生成的 `.md` 即可生成笔记，不重新下载/转写，**原文件只读**；无时间信息时用「原文第 N 段」定位，绝不编造时间戳
-- 🧾 **统一数据契约**：每个任务输出 `transcript.json`（`schema_version: 2.0`，毫秒时间 + 来源类型 + 时间精度），JSON 是溯源事实来源，Markdown 只是展示
+## 一、老师指定功能：字幕优先与 Whisper 自动兜底
 
+传统流程需要下载视频、提取音频，再使用 Whisper 进行语音识别。
 
-## 转移说明
-因为作者的旧账号（lanbinshijie）已经停用，仓库已经转移到新账号（lanbinleo）
+本项目新增字幕发现、选择与解析模块。
 
-感谢各位的支持，如果有任何想法欢迎在issue中提出，或者提交pr~
+处理流程：
 
-v2版本开发进度，请查看dev分支；v3版本更名为v2版本
+1. 输入视频链接。
+2. 查找视频可用字幕。
+3. 优先使用符合条件、来源可判断的普通字幕。
+4. 没有可靠字幕时，自动回退至 Whisper。
+5. 输出 Markdown 和统一时间轴数据。
 
-![alt text](./assets/new_v_sc.png)
+支持三种文字获取方式：
+
+* 智能模式：默认优先字幕，必要时自动使用 Whisper。
+* 强制 Whisper：不使用平台字幕，直接执行语音识别。
+* 仅提取字幕：不下载音频进行转写，字幕不可用时明确报错。
+
+支持 B站指定分P，按目标分P的 CID 查找字幕，避免不同分P之间的数据混淆。
+
+字幕来源分为人工字幕、自动字幕、未知来源和 Whisper 转写等类型。平台返回的普通字幕类别不代表已经独立核实其制作人员。
+
+## 二、自主创新：可溯源 AI 智能课程笔记
+
+传统 AI 视频总结可能出现知识点缺少依据、引用错误等问题。
+
+本项目新增可溯源智能笔记功能。
+
+AI 根据原始字幕或转写内容生成：
+
+**1. 章节结构**
+
+按照原始内容识别主要章节，提供章节名称及可用的时间位置。
+
+**2. 核心知识点**
+
+提取视频中的主要知识点，附上对应的原文证据。
+
+系统使用统一的 `TranscriptDocument` 数据结构，记录原文、片段 ID、来源和时间信息。
+
+AI 生成结构化知识点后，程序根据引用的片段 ID 从原始数据中回填证据，而不是直接信任 AI 自己编写的引文。
+
+对于无法匹配的引用、部分可检测的异常信息，系统会拒绝或提示待核实。
+
+**本功能的创新重点是提高 AI 笔记的可检查性，不保证所有知识点都已经通过完整语义事实核验。**
+
+此外，支持导入历史 Markdown 文件生成学习笔记，不需要重新下载视频或重新进行 Whisper 识别。
+
+没有可靠时间码时使用「原文第 N 段」定位，不编造时间戳。
+
+## 三、V1 已有改造功能
+
+V2 建立在 `feature/douyin-support` 分支基础上，保留此前已经实现的功能：
+
+* B站、YouTube 和现有抖音链接解析能力。
+* B站多分P参数保留与独立缓存。
+* 本地音视频文件导入。
+* Whisper 视频语音转文字。
+* 智谱 GLM、MiniMax 等兼容接口的 AI 文本修订。
+* Windows 桌面 UI。
+* Markdown 结果保存、打开与预览。
+
+抖音等平台的在线下载可能受到访问限制，必要时可通过本地文件导入功能处理合法获取的媒体文件。
+
+## 四、项目测试成果
+
+最终 V2 共包含 160 项单元测试。
+
+在 Windows 11、Python 3.10.11 的指定测试环境下，隔离虚拟环境 Scripts PATH 后，160/160 项测试通过。
+
+原 PATH 环境下存在一项与 `yt-dlp.EXE` 大小写敏感断言有关的既有失败，该问题未在本轮作业中修改。
+
+真实测试包括：
+
+* YouTube 普通中文字幕直接提取：290 段，未运行 Whisper。
+* B站第 33P 无字幕回退：Whisper small 完成 114 段转写。
+* 旧 Markdown 生成可溯源笔记：最终 GUI 测试生成 3 个章节、9 个核心知识点，其中 2 处标记待核实。
+* Windows GUI 启动、字幕模式选择、笔记生成及文件打开检查。
+
+完整测试记录：
+
+[docs/V2_TEST_REPORT.md](docs/V2_TEST_REPORT.md)
+
+技术设计：
+
+[docs/V2_DESIGN.md](docs/V2_DESIGN.md)
+
+实际桌面 UI：
+
+[docs/screenshots/ui-main.png](docs/screenshots/ui-main.png)
+
+## 五、已知限制
+
+* Whisper small 的识别准确率尚未专门优化，可能存在错字、漏字或专业术语误识别。
+* B站登录态下存在人工字幕轨道时的真实下载尚未完成充分验证。
+* 长视频多分块智能笔记尚未完成真实端到端测试。
+* 原文引用检查不能替代完整语义事实核验。
+* 使用者应当自行核对重要的学习内容。
+
+---
+
+## 原项目来源与致谢
+
+本项目基于开源 Bili2Text 项目进行课程作业二次开发。
+
+原项目 README 记载，项目维护账号曾由 `lanbinshijie` 迁移至 `lanbinleo`。
+
+原项目作者及贡献者的署名与版权应予保留。本仓库继续遵守原项目 MIT 许可证要求。
+
+以下保留原版项目的基础使用说明，并补充 V2 的实际使用方式。
 
 ## 简介 🌟
 bili2text 是一个用于将视频（Bilibili、YouTube等）转换为文本的工具🛠️。这个项目通过一个简单的流程实现：下载视频、提取音频、分割音频，并使用 whisper 模型将语音转换为文本。支持AI润色功能，让转写结果更加准确和流畅。整个过程是自动的，只需输入视频链接即可。整个过程行云流水，一步到胃😂
@@ -75,9 +161,9 @@ bili2text 是一个用于将视频（Bilibili、YouTube等）转换为文本的�
 ### 1. 克隆并安装
 
 ```bash
-git clone https://github.com/<你的用户名>/bili2text.git
-cd bili2text
-git checkout feature/douyin-support
+git clone https://github.com/luhao626/bili2text-plus.git
+cd bili2text-plus
+git switch feature/subtitles-and-study-notes
 ```
 
 ```bash
@@ -145,7 +231,7 @@ python main.py
 python -m unittest discover -s tests
 ```
 
-148 个单元测试全部使用 mock，不访问任何视频平台、不调用真实 AI 接口。
+V2 最终共 160 项单元测试，使用固定样本和 Mock 避免真实网络及 AI API 依赖。在指定 Windows Python 3.10.11 测试环境下，隔离虚拟环境 Scripts PATH 后 160/160 通过；原 PATH 下有一项 yt-dlp.EXE 大小写敏感断言失败，详见 V2 测试报告。
 
 ### 6. 输出文件位置
 
@@ -163,21 +249,6 @@ outputs/
 ```
 
 媒体缓存分别在 `bilibili_video/<缓存键>/` 与 `audio/`，均已被 `.gitignore` 排除。
-
-## 示例 📋
-
-```python
-from exAudio import process_audio_split
-from speech2text import load_whisper, run_analysis, refine_text
-from utils import download_video
-
-url = "https://www.bilibili.com/video/BV1vwME6AEpd?p=33"
-cache_key = download_video(url)            # -> BV1vwME6AEpd_p33
-folder = process_audio_split(cache_key)    # 提取并切分音频
-load_whisper("small")
-run_analysis(folder, prompt="以下是普通话的句子。")
-refine_text(folder)                        # 生成 outputs/<folder>_refined.md
-```
 
 ## 技术栈 🧰
 - [Python](https://www.python.org/) 主要编程语言，负责实现程序逻辑功能
@@ -198,20 +269,10 @@ refine_text(folder)                        # 生成 outputs/<folder>_refined.md
 - ✅ 自动处理多P视频，每个分P使用独立缓存，互不覆盖
 
 ### 文本转写
-- ✅ 使用 Whisper 模型进行高精度语音转文字
-- ✅ 支持本地模型和 OpenAI API 云端转写
+- ✅ 使用 Whisper 模型进行语音转文字，实际准确率受到模型、音质及专业术语影响
+- ✅ 本次 V2 已验证本地 Whisper 模型转写流程
 - ✅ 自动分割长音频，提高处理效率
 - ✅ 生成 Markdown 格式的原始转写文档
-
-### 字幕与智能笔记（V2）
-- ✅ **人工字幕优先**：有可靠人工字幕时直接生成 Markdown，不下载视频、不运行 Whisper
-- ✅ **三种文字获取方式**：智能模式 / 强制 Whisper / 仅提取字幕（后者失败即报错，绝不偷偷转写）
-- ✅ **来源可核实**：区分人工字幕、自动字幕、未知来源，界面显示来源与回退原因
-- ✅ **B站分P隔离**：按目标分P的 cid 查询字幕，`?p=33` 不会误用第 1P
-- ✅ **字幕校验**：SRT / VTT / B站 JSON 解析，检查空字幕、非法时间码与覆盖率
-- ✅ **可溯源笔记**：只输出「章节结构」「核心知识点」，证据由程序按 `segment_id` 从原文回填
-- ✅ **无效引用可拒绝**：AI 编造的 ID 直接丢弃，引文与原文不符时标注「待核实」
-- ✅ **旧 Markdown 兼容**：直接对历史 `.md` 生成笔记，原文件只读、无时间信息时不编造时间
 
 ### AI润色
 - ✅ 支持智谱 GLM（含免费 `glm-4.7-flash`）、MiniMax 或任意 OpenAI 兼容接口
@@ -219,40 +280,15 @@ refine_text(folder)                        # 生成 outputs/<folder>_refined.md
 - ✅ 自动关闭思考模式、429 限流重试、重复尾部清理，避免空输出
 - ✅ 润色文档独立保存为 `*_refined.md`，不覆盖原始文档
 
-## 后续开发计划 📅
-
-- [X] 生成requirements.txt
-- [X] UI化设计
-- [X] 支持YouTube视频下载
-- [X] 优先下载MP4格式
-- [X] AI润色功能
-
-
 ## 运行截图 📷
-<!-- assets/screenshot1.png -->
-<img src="assets/screenshot3.png" alt="screenshot3" width="600"/>
-<img src="assets/screenshot2.png" alt="screenshot2" width="600"/>
-<img src="assets/screenshot1.png" alt="screenshot1" width="600"/>
 
-## Star History ⭐
-
-[![Star History Chart](https://api.star-history.com/svg?repos=lanbinshijie/bili2text&type=Date)](https://star-history.com/#lanbinshijie/bili2text&Date)
-
-
+![Bili2Text Plus V2 桌面界面](docs/screenshots/ui-main.png)
 
 ## 许可证 📄
 本项目根据 MIT 许可证发布。
 
 ## 贡献 💡
 如果你想为这个项目做出贡献，欢迎提交 Pull Request 或创建 Issue。
-
-## 投喂一下！
-
-> TKTg2T7u7xdV4xDAzbzird2qmWoqLanbin
-
-![image](https://github.com/user-attachments/assets/412470b8-7fd5-4632-a085-9c48a9d5e18b)
-
-TRC20链！谢谢大家！
 
 ## 致谢 🙏
 再此感谢Open Teens对青少年开源社区做出的贡献！[@OpenTeens](https://openteens.org)
