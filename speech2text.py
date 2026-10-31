@@ -124,6 +124,56 @@ def load_whisper(model="tiny"):
         if original_monitor:
             tqdm._monitor.TMonitor = original_monitor
 
+def _collection_slices(filename, prompt):
+    """按切片顺序转写，返回（各片文本, 各片原始 segment 信息）。
+
+    V1 的 ``run_analysis`` 与 V2 的 ``run_analysis_timeline`` 共用这一份实现，
+    避免同一段音频被转写两次。
+    """
+    global whisper_model
+    print("正在加载Whisper模型或准备API...")
+    audio_list = os.listdir(f"audio/slice/{filename}")
+    print("模型准备完成！")
+    audio_files = sorted(
+        audio_list,
+        key=lambda x: int(os.path.splitext(x)[0])  # 按文件名数字排序
+    )
+    print("正在转换文本...")
+
+    texts = []
+    groups = []
+    for idx, fn in enumerate(audio_files, start=1):
+        # 检查是否请求停止
+        if stop_event and stop_event.is_set():
+            print("任务已停止")
+            raise KeyboardInterrupt("用户请求停止任务")
+
+        print(f"正在转换第{idx}/{len(audio_files)}个音频... {fn}")
+        slice_path = f"audio/slice/{filename}/{fn}"
+        if USE_OPENAI_API:
+            text = _transcribe_via_openai(slice_path, prompt)
+            segments = []
+        else:
+            result = whisper_model.transcribe(slice_path, initial_prompt=prompt)
+            segments = result.get("segments", []) or []
+            text = "".join([seg["text"] for seg in segments if seg is not None])
+        print(text)
+        texts.append(text)
+        groups.append({"index": idx, "segments": segments, "text": text})
+    return texts, groups
+
+
+def _write_raw_markdown(filename, raw_text):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_path = os.path.join(OUTPUT_DIR, f"{filename}.md")
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("# 转写结果（原始）\n\n")
+        f.write(raw_text.strip())
+        f.write("\n")
+    print(f"原始转写结果已保存为 Markdown: {output_path}")
+    return output_path
+
+
 def run_analysis(filename, model="tiny", prompt="以下是普通话的句子。"):
     """
     执行语音转文字分析，生成原始转写文档（不进行AI润色）。
@@ -134,58 +184,74 @@ def run_analysis(filename, model="tiny", prompt="以下是普通话的句子。"
     返回:
         原始转写文本
     """
-    global whisper_model
-    print("正在加载Whisper模型或准备API...")
-    # 读取列表中的音频文件
-    audio_list = os.listdir(f"audio/slice/{filename}")
-    print("模型准备完成！")
-    # 添加排序逻辑
-    audio_files = sorted(
-        audio_list,
-        key=lambda x: int(os.path.splitext(x)[0])  # 按文件名数字排序
-    )
-    # 创建输出文件夹
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    print("正在转换文本...")
-
-    audio_list.sort(key=lambda x: int(x.split(".")[0])) # 将 audio_list 按照切片序号排序
-
-    texts = []
-    for idx, fn in enumerate(audio_files, start=1):
-        # 检查是否请求停止
-        if stop_event and stop_event.is_set():
-            print("任务已停止")
-            raise KeyboardInterrupt("用户请求停止任务")
-        
-        print(f"正在转换第{idx}/{len(audio_files)}个音频... {fn}")
-        slice_path = f"audio/slice/{filename}/{fn}"
-        if USE_OPENAI_API:
-            text = _transcribe_via_openai(slice_path, prompt)
-        else:
-            result = whisper_model.transcribe(slice_path, initial_prompt=prompt)
-            text = "".join([seg["text"] for seg in result.get("segments", []) if seg is not None])
-        print(text)
-        texts.append(text)
-
+    texts, _groups = _collection_slices(filename, prompt)
     raw_text = "\n".join(texts)
-    
+
     # 只保存原始转写结果
-    output_path = os.path.join(OUTPUT_DIR, f"{filename}.md")
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("# 转写结果（原始）\n\n")
-        f.write(raw_text.strip())
-        f.write("\n")
-    print(f"原始转写结果已保存为 Markdown: {output_path}")
-    
+    _write_raw_markdown(filename, raw_text)
+
     return raw_text
 
 
-def refine_text(filename, prompt="以下是普通话的句子。"):
+def run_analysis_timeline(filename, model="tiny", prompt="以下是普通话的句子。", slice_ms=45000):
+    """与 ``run_analysis`` 相同的转写流程，但额外返回带时间的片段。
+
+    时间算法：切片序号 × 45 秒 + 片内 Whisper 相对偏移。
+    45 秒切片本身只有近似定位能力，因此返回的 ``precision`` 固定为
+    ``approximate`` —— 绝不把切片时间冒充逐句精确时间。
+
+    返回：``[{"start_ms", "end_ms", "text", "precision"}, ...]``
+    """
+    texts, groups = _collection_slices(filename, prompt)
+    raw_text = "\n".join(texts)
+    _write_raw_markdown(filename, raw_text)
+
+    cues = []
+    for group in groups:
+        base = (group["index"] - 1) * slice_ms
+        segments = group["segments"]
+        if segments:
+            for segment in segments:
+                if segment is None:
+                    continue
+                text = (segment.get("text") or "").strip()
+                if not text:
+                    continue
+                start = base + int(float(segment.get("start") or 0) * 1000)
+                end = base + int(float(segment.get("end") or 0) * 1000)
+                if end <= start:
+                    end = start + 1000
+                cues.append(
+                    {
+                        "start_ms": start,
+                        "end_ms": end,
+                        "text": text,
+                        "precision": "approximate",
+                    }
+                )
+        else:
+            # 云端接口只返回整段文本，只能按切片区间近似定位
+            text = (group["text"] or "").strip()
+            if text:
+                cues.append(
+                    {
+                        "start_ms": base,
+                        "end_ms": base + slice_ms,
+                        "text": text,
+                        "precision": "approximate",
+                    }
+                )
+    return cues
+
+
+def refine_text(filename, prompt="以下是普通话的句子。", source_path=None):
     """
     对已生成的原始转写文档进行AI润色，生成新的润色文档。
     参数:
         filename: 音频文件夹名称（用于读取原始文档）
         prompt: 润色提示词
+        source_path: 可选，直接指定要润色的 Markdown（V2 任务目录中的文件）；
+                     不传时保持 V1 行为，读取 OUTPUT_DIR/<filename>.md
     返回:
         润色后的文本
     """
@@ -198,9 +264,18 @@ def refine_text(filename, prompt="以下是普通话的句子。"):
 
     if not minimax_client:
         raise RuntimeError("AI 客户端未初始化，请检查 API Key、Base URL 与模型 ID 是否正确。")
-    
+
     # 读取原始转写文档
-    raw_file_path = os.path.join(OUTPUT_DIR, f"{filename}.md")
+    if source_path:
+        raw_file_path = source_path
+        output_dir = os.path.dirname(os.path.abspath(source_path))
+        stem = os.path.splitext(os.path.basename(source_path))[0]
+        if stem.endswith("_refined"):
+            stem = stem[: -len("_refined")]
+    else:
+        raw_file_path = os.path.join(OUTPUT_DIR, f"{filename}.md")
+        output_dir = OUTPUT_DIR
+        stem = filename
     if not os.path.exists(raw_file_path):
         raise FileNotFoundError(f"未找到原始转写文档: {raw_file_path}，请先执行转写。")
     
@@ -231,7 +306,7 @@ def refine_text(filename, prompt="以下是普通话的句子。"):
             raise RuntimeError("润色结果为空，已放弃写入文件（原始文档未改动）。")
 
         # 保存润色结果到新文件（不覆盖原始文档）
-        refined_output_path = os.path.join(OUTPUT_DIR, f"{filename}_refined.md")
+        refined_output_path = os.path.join(output_dir, f"{stem}_refined.md")
         with open(refined_output_path, "w", encoding="utf-8") as f:
             f.write("# 转写结果（AI润色版）\n\n")
             f.write(refined_text.strip())

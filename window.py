@@ -34,7 +34,17 @@ from tkinter import END, filedialog
 
 import llm_config
 import platforms
+import legacy_markdown
+import pipeline
+import study_notes
+import subtitles
 from exAudio import process_audio_split
+from transcript import (
+    SOURCE_LABELS,
+    SOURCE_WHISPER,
+    TIME_APPROXIMATE,
+    format_ms,
+)
 from utils import download_video
 
 speech_to_text = None  # speech2text 模块
@@ -44,8 +54,14 @@ ui_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
 
 current_md_path = None  # 当前结果对应的原始 Markdown
 last_stem = None  # 当前任务的文件名主干（用于 AI 润色）
+current_document = None  # 当前 TranscriptDocument（用于生成笔记）
+current_task = None  # 当前任务输出目录（pipeline.TaskPaths）
+last_notes_path = None  # 最近生成的 study_notes.md
 _orig_stdout = sys.stdout
 _orig_stderr = sys.stderr
+
+MODE_ORDER = [subtitles.MODE_SMART, subtitles.MODE_WHISPER_ONLY, subtitles.MODE_SUBTITLE_ONLY]
+MODE_VALUES = [subtitles.MODE_LABELS[mode] for mode in MODE_ORDER]
 
 PROVIDER_ORDER = ["zhipu", "minimax", "custom"]
 PROVIDER_LABELS = [llm_config.PROVIDER_PRESETS[p]["label"] for p in PROVIDER_ORDER]
@@ -114,11 +130,15 @@ def set_running_state(running: bool) -> None:
         start_button.config(state="disabled")
         refine_button.config(state="disabled")
         test_api_button.config(state="disabled")
+        notes_button.config(state="disabled")
+        pick_notes_button.config(state="disabled")
         stop_button.config(state="normal")
     else:
         start_button.config(state="normal")
         refine_button.config(state="normal")
         test_api_button.config(state="normal")
+        notes_button.config(state="normal")
+        pick_notes_button.config(state="normal")
         stop_button.config(state="disabled")
 
 
@@ -240,9 +260,76 @@ def on_load_whisper() -> None:
 # --------------------------------------------------------------------------- #
 # 转写主流程
 # --------------------------------------------------------------------------- #
+def current_mode() -> str:
+    index = mode_combo.current()
+    if index < 0 or index >= len(MODE_ORDER):
+        return subtitles.MODE_SMART
+    return MODE_ORDER[index]
+
+
+def base_output_dir() -> str:
+    return output_dir_var.get().strip() or "outputs"
+
+
 def worker_process(link: str) -> None:
-    global last_stem
+    global last_stem, current_document, current_task
     try:
+        try:
+            ref = platforms.resolve_video_input(link)
+        except platforms.UnsupportedLinkError as error:
+            post("log", f"[错误] {error}")
+            post("status", "链接无法识别")
+            return
+
+        mode = current_mode()
+        task_id = pipeline.new_task_id(ref.cache_key)
+        paths = pipeline.TaskPaths(os.path.join(base_output_dir(), task_id)).ensure()
+        current_task = paths
+        post("log", f"[任务] 输出目录：{os.path.abspath(paths.root)}")
+        post("log", f"[任务] 文字获取方式：{subtitles.MODE_LABELS[mode]}")
+
+        fallback_reason = ""
+        selection = None
+        # 本地文件按既定约定继续走 Whisper，不额外探测字幕
+        if ref.platform == "local":
+            fallback_reason = "本地文件默认使用 Whisper 转写"
+        elif mode != subtitles.MODE_WHISPER_ONLY:
+            post("stage", "① 查找字幕")
+            post("status", "正在查找可用字幕…")
+            try:
+                selection = subtitles.resolve_subtitles(ref, mode=mode)
+            except subtitles.SubtitleError as error:
+                # 仅提取字幕模式：必须明确失败，绝不偷偷转写
+                post("log", f"[失败] {error}")
+                post("status", "未获取到可用字幕")
+                return
+            fallback_reason = selection.fallback_reason
+            if selection.document is not None:
+                document = selection.document
+                manifest = pipeline.manifest_from_document(
+                    document, task_id=task_id, mode=mode
+                )
+                pipeline.write_transcript(document, paths, manifest)
+                current_document = document
+                last_stem = None
+                source_var.set(
+                    f"来源：{SOURCE_LABELS.get(document.source_type, document.source_type)}"
+                    f"（{document.language or '未标语言'}）"
+                )
+                fallback_var.set("")
+                post("log", f"[字幕] {selection.reason}")
+                post("log", f"[字幕] 共 {len(document.segments)} 段，时间码取自信字幕")
+                post("result", paths.transcript_md)
+                post("stage", "② 完成（未下载视频，未运行 Whisper）")
+                post("status", "字幕已转换为 Markdown，可生成智能笔记")
+                return
+            post("log", f"[字幕] {selection.fallback_reason or '未使用字幕'}")
+            fallback_var.set(selection.fallback_reason or "")
+            source_var.set("来源：Whisper 转写")
+        else:
+            fallback_var.set("已选择强制 Whisper")
+            source_var.set("来源：Whisper 转写")
+
         if speech_to_text is None:
             post("log", "[错误] 请先点击「加载模型」")
             post("status", "Whisper 未加载")
@@ -252,10 +339,10 @@ def worker_process(link: str) -> None:
             post("status", "Whisper 未加载")
             return
 
-        speech_to_text.set_output_dir(output_dir_var.get().strip() or "outputs")
+        speech_to_text.set_output_dir(base_output_dir())
         speech_to_text.set_stop_event(stop_event)
 
-        post("stage", "① 下载视频")
+        post("stage", "② 下载视频")
         post("status", "正在下载视频…")
         file_identifier = download_video(link, progress=lambda message: post("status", message))
         if file_identifier is None:
@@ -266,7 +353,7 @@ def worker_process(link: str) -> None:
             post("log", "[停止] 任务已在下载后停止")
             return
 
-        post("stage", "② 提取并切分音频")
+        post("stage", "③ 提取并切分音频")
         post("status", "正在提取音频…")
         folder_name = process_audio_split(file_identifier)
         last_stem = folder_name
@@ -274,18 +361,54 @@ def worker_process(link: str) -> None:
             post("log", "[停止] 任务已在音频处理后停止")
             return
 
-        post("stage", "③ Whisper 转写")
+        post("stage", "④ Whisper 转写")
         post("status", "正在转写（耗时较长，请耐心等待）…")
-        speech_to_text.run_analysis(
+        timeline = speech_to_text.run_analysis_timeline(
             folder_name,
             prompt=f"以下是普通话的句子。这是一个关于{file_identifier}的视频。",
         )
 
-        output_path = os.path.join(speech_to_text.OUTPUT_DIR, f"{folder_name}.md")
-        post("result", output_path)
-        post("log", f"[完成] 原始转写已保存：{os.path.abspath(output_path)}")
-        post("stage", "④ 完成")
-        post("status", "转写完成，可点击「AI 修订」生成润色版")
+        cues = [
+            (item["start_ms"], item["end_ms"], item["text"])
+            for item in timeline
+            if (item.get("text") or "").strip()
+        ]
+        if not cues:
+            post("log", "[失败] 转写结果为空，未生成正式文件")
+            post("status", "转写结果为空")
+            return
+        document = subtitles.build_document(
+            cues,
+            source_type=SOURCE_WHISPER,
+            language="zh",
+            platform=ref.platform,
+            video_id=ref.video_id,
+            title=(selection.video_title if selection else "") or ref.title_hint or ref.video_id,
+            url=ref.canonical_url,
+            page=ref.page,
+            duration_ms=selection.duration_ms if selection else None,
+            precision=TIME_APPROXIMATE,
+            provenance={
+                "slice_ms": 45000,
+                "time_note": "按 45 秒切片估算的近似位置，非逐句精确时间",
+                "fallback_reason": fallback_reason,
+            },
+        )
+        manifest = pipeline.manifest_from_document(
+            document,
+            task_id=task_id,
+            mode=mode,
+            fallback_reason=fallback_reason,
+            whisper_model=model_var.get(),
+        )
+        pipeline.write_transcript(document, paths, manifest)
+        current_document = document
+
+        post("result", paths.transcript_md)
+        post("log", f"[完成] 原始转写已保存：{os.path.abspath(paths.transcript_md)}")
+        post("log", f"[完成] 时间轴数据：{os.path.abspath(paths.transcript_json)}")
+        post("stage", "⑤ 完成")
+        post("status", "转写完成，可生成智能笔记或点击「AI 修订」")
     except KeyboardInterrupt:
         post("log", "[停止] 任务已停止")
         post("status", "任务已停止")
@@ -307,9 +430,6 @@ def on_start() -> None:
     raw = link_entry.get().strip()
     if not raw:
         post("log", "[提示] 请输入视频链接或粘贴分享文案")
-        return
-    if speech_to_text is None:
-        post("log", "[提示] 请先点击「加载模型」")
         return
     try:
         ref = platforms.resolve_video_input(raw)
@@ -339,11 +459,17 @@ def worker_refine(stem: str) -> None:
             post("log", "[错误] 请先加载 Whisper（仅为初始化模块）")
             return
         apply_llm_settings()
-        post("stage", "④ AI 润色")
+        post("stage", "AI 润色")
         post("status", "正在调用 AI 润色…")
         speech_to_text.set_stop_event(stop_event)
-        speech_to_text.refine_text(stem, prompt=f"以下是普通话的句子。这是一个关于{stem}的视频。")
-        refined_path = os.path.join(speech_to_text.OUTPUT_DIR, f"{stem}_refined.md")
+        source_path = current_md_path if current_md_path and os.path.isfile(current_md_path) else None
+        speech_to_text.refine_text(
+            stem,
+            prompt=f"以下是普通话的句子。这是一个关于{stem}的视频。",
+            source_path=source_path,
+        )
+        output_dir = os.path.dirname(os.path.abspath(source_path)) if source_path else speech_to_text.OUTPUT_DIR
+        refined_path = os.path.join(output_dir, f"{stem}_refined.md")
         post("result", refined_path)
         post("log", f"[完成] 润色文档已保存：{os.path.abspath(refined_path)}")
         post("status", "润色完成")
@@ -355,6 +481,136 @@ def worker_refine(stem: str) -> None:
         post("status", "润色失败，详见日志")
     finally:
         post("done", "")
+
+
+# --------------------------------------------------------------------------- #
+# 智能笔记
+# --------------------------------------------------------------------------- #
+def notes_client_and_settings():
+    """复用 V1 的通用 LLM 配置（界面值优先，其次环境变量）。"""
+    settings = llm_config.load_settings(current_llm_override())
+    return llm_config.build_client(settings), settings
+
+
+def worker_generate_notes(document, paths) -> None:
+    global last_notes_path
+    try:
+        client, settings = notes_client_and_settings()
+        if client is None:
+            post("log", "[错误] 未配置 AI 密钥，无法生成智能笔记")
+            post("status", "智能笔记需要 AI 配置")
+            return
+        post("stage", "生成智能笔记")
+        post("status", "正在调用 AI 整理章节与知识点…")
+        notes = study_notes.generate_study_notes(
+            document,
+            client,
+            settings,
+            title=document.title,
+            progress=lambda message: post("status", message),
+            stop_event=stop_event,
+        )
+        notes_path = study_notes.write_study_notes(notes, document, paths.notes_md)
+        last_notes_path = notes_path
+
+        manifest_path = paths.manifest_json
+        if os.path.exists(manifest_path):
+            manifest = pipeline.load_manifest(manifest_path)
+            manifest.llm_provider = settings.provider_label
+            manifest.llm_model = settings.model
+            manifest.notes_complete = notes.complete
+            manifest.warnings = list(dict.fromkeys(manifest.warnings + notes.warnings))
+            pipeline.write_notes(notes_path, paths, manifest, notes.complete)
+        else:
+            post("log", "[提示] 未找到任务清单，笔记已生成但未登记")
+
+        post("result", notes_path)
+        post("log", f"[完成] 智能笔记已保存：{os.path.abspath(notes_path)}")
+        post("log", f"[笔记] 章节 {len(notes.chapters)} 个，知识点 {len(notes.key_points)} 个")
+        if notes.dropped_refs:
+            post("log", f"[笔记] 已丢弃 {notes.dropped_refs} 处无效引用（AI 编造的 ID 不会被采用）")
+        for warning in notes.warnings[:5]:
+            post("log", f"[笔记] {warning}")
+        if not notes.complete:
+            post("log", "[注意] 笔记只覆盖了部分原文，已在文件中标注")
+            post("status", "笔记已生成（部分内容，未完整覆盖原文）")
+        else:
+            post("status", "智能笔记已生成")
+    except KeyboardInterrupt:
+        post("log", "[停止] 笔记生成已停止（已生成的转写文件保留）")
+        post("status", "笔记生成已停止")
+    except Exception as error:  # noqa: BLE001
+        post("log", f"[错误] 笔记生成失败：{error}")
+        post("log", "[提示] 原始转写文件已保留，可稍后重试")
+        post("status", "笔记生成失败，详见日志")
+    finally:
+        post("done", "")
+
+
+def require_document():
+    """取当前文档：优先用刚生成的内存文档，其次复用已有 Markdown。"""
+    global current_document, current_task
+    if current_document is not None:
+        return current_document, current_task
+    if current_md_path and os.path.isfile(current_md_path):
+        return prepare_legacy_task(current_md_path)
+    return None, None
+
+
+def prepare_legacy_task(md_path: str):
+    """把旧 Markdown 转成文档并建立任务目录（只读原文件）。"""
+    global current_document, current_task
+    document = legacy_markdown.load_legacy_markdown(md_path)
+    task_id = pipeline.new_task_id(os.path.splitext(os.path.basename(md_path))[0], prefix="legacy_")
+    paths = pipeline.TaskPaths(os.path.join(base_output_dir(), task_id)).ensure()
+    manifest = pipeline.manifest_from_document(
+        document, task_id=task_id, mode="legacy_markdown"
+    )
+    manifest.files = []
+    document.write_json(paths.transcript_json)
+    manifest.files = [pipeline.TRANSCRIPT_JSON]
+    manifest.write(paths)
+    current_document = document
+    current_task = paths
+    post("log", f"[旧文档] 已读取 {document.provenance.get('paragraph_count')} 段：{md_path}")
+    post("log", f"[旧文档] 原文件保持不变；无时间信息，笔记使用「原文第 N 段」定位")
+    return document, paths
+
+
+def on_generate_notes() -> None:
+    document, paths = require_document()
+    if document is None or paths is None:
+        post("log", "[提示] 请先完成转写，或先选择已有 Markdown")
+        return
+    stop_event.clear()
+    set_running_state(True)
+    run_in_thread(worker_generate_notes, document, paths)
+
+
+def on_pick_markdown_for_notes() -> None:
+    initial = base_output_dir()
+    path = filedialog.askopenfilename(
+        title="选择已有 Markdown（不会修改原文件）",
+        initialdir=initial if os.path.isdir(initial) else ".",
+        filetypes=[("Markdown", "*.md")],
+    )
+    if not path:
+        return
+    try:
+        prepare_legacy_task(path)
+    except Exception as error:  # noqa: BLE001
+        post("log", f"[错误] 读取旧 Markdown 失败：{error}")
+        return
+    show_result(path)
+    set_running_state(True)
+    run_in_thread(worker_generate_notes, current_document, current_task)
+
+
+def on_open_notes() -> None:
+    if last_notes_path and os.path.isfile(last_notes_path):
+        os.startfile(last_notes_path)  # noqa: S606
+        return
+    post("log", "[提示] 还没有生成过智能笔记")
 
 
 def on_refine() -> None:
@@ -485,6 +741,8 @@ def build_ui(selftest: bool = False) -> None:
     global link_entry, model_var, output_dir_var, result_path_var
     global provider_combo, base_entry, model_entry, key_entry
     global start_button, stop_button, refine_button, test_api_button
+    global mode_combo, source_var, fallback_var
+    global notes_button, pick_notes_button, open_notes_button
 
     app = ttk.Window(title="Bili2Text Plus — 多平台视频转文字助手", themename="litera")
     # 按 DPI 缩放窗口与字体度量，避免高分屏下界面过小
@@ -550,6 +808,21 @@ def build_ui(selftest: bool = False) -> None:
     ttk.Entry(cfg_row, textvariable=output_dir_var, width=28).pack(side=LEFT)
     ttk.Button(cfg_row, text="选择…", bootstyle="secondary-outline", command=on_pick_output_dir).pack(side=LEFT, padx=4)
 
+    # ---------------- 字幕设置 ----------------
+    sub_row = ttk.Frame(cfg_box)
+    sub_row.pack(fill=X, padx=10, pady=(0, 8))
+    ttk.Label(sub_row, text="文字获取方式").pack(side=LEFT)
+    mode_var = ttk.StringVar(value=MODE_VALUES[0])
+    mode_combo = ttk.Combobox(
+        sub_row, textvariable=mode_var, values=MODE_VALUES, width=30, state="readonly"
+    )
+    mode_combo.current(0)
+    mode_combo.pack(side=LEFT, padx=6)
+    source_var = ttk.StringVar(value="来源：未开始")
+    fallback_var = ttk.StringVar(value="")
+    ttk.Label(sub_row, textvariable=source_var, bootstyle="info").pack(side=LEFT, padx=(8, 4))
+    ttk.Label(sub_row, textvariable=fallback_var, bootstyle="warning").pack(side=LEFT)
+
     # ---------------- AI 润色 ----------------
     ai_box = ttk.Labelframe(app, text=" AI 润色 ")
     ai_box.pack(fill=X, padx=16, pady=6)
@@ -587,6 +860,32 @@ def build_ui(selftest: bool = False) -> None:
     base_entry.insert(0, settings.base_url)
     model_entry.insert(0, settings.model)
 
+    # ---------------- 智能笔记 ----------------
+    notes_box = ttk.Labelframe(app, text=" 智能笔记 ")
+    notes_box.pack(fill=X, padx=16, pady=6)
+    notes_row = ttk.Frame(notes_box)
+    notes_row.pack(fill=X, padx=10, pady=8)
+    notes_button = ttk.Button(
+        notes_row, text="生成智能笔记", bootstyle="primary-outline", command=on_generate_notes
+    )
+    notes_button.pack(side=LEFT)
+    pick_notes_button = ttk.Button(
+        notes_row,
+        text="选择 Markdown 生成笔记…",
+        bootstyle="secondary-outline",
+        command=on_pick_markdown_for_notes,
+    )
+    pick_notes_button.pack(side=LEFT, padx=6)
+    open_notes_button = ttk.Button(
+        notes_row, text="打开笔记文件", bootstyle="secondary-outline", command=on_open_notes
+    )
+    open_notes_button.pack(side=LEFT)
+    ttk.Label(
+        notes_row,
+        text="只生成「章节结构」与「核心知识点」，证据由程序从原文回填",
+        bootstyle="secondary",
+    ).pack(side=LEFT, padx=10)
+
     # ---------------- 状态栏 ----------------
     state_row = ttk.Frame(app)
     state_row.pack(fill=X, padx=16, pady=(2, 6))
@@ -623,7 +922,7 @@ def build_ui(selftest: bool = False) -> None:
 
     footer = ttk.Frame(app)
     footer.pack(fill=X, padx=16, pady=(0, 10))
-    ttk.Label(footer, text="版本 2.1.0-plus", bootstyle="secondary").pack(side=LEFT)
+    ttk.Label(footer, text="版本 2.2.0-plus（V2：字幕优先 · 智能笔记）", bootstyle="secondary").pack(side=LEFT)
     github_label = ttk.Label(footer, text="开源仓库", bootstyle="primary", cursor="hand2")
     github_label.pack(side=LEFT, padx=12)
     github_label.bind("<Button-1>", open_github_link)
