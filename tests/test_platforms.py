@@ -100,6 +100,37 @@ class YoutubeAndGenericTests(unittest.TestCase):
             resolve_video_input("")
 
 
+class DouyinInvalidPageTests(unittest.TestCase):
+    """抖音链接缺少单条视频 ID 时必须报错，而不是把首页当视频下载。"""
+
+    def test_homepage_rejected(self):
+        with self.assertRaises(UnsupportedLinkError):
+            resolve_video_input("https://www.douyin.com")
+
+    def test_homepage_with_slash_rejected(self):
+        with self.assertRaises(UnsupportedLinkError):
+            resolve_video_input("https://www.douyin.com/")
+
+    def test_user_page_rejected(self):
+        with self.assertRaises(UnsupportedLinkError):
+            resolve_video_input("https://www.douyin.com/user/MS4wLjABAAAA")
+
+    def test_error_message_is_actionable(self):
+        with self.assertRaises(UnsupportedLinkError) as context:
+            resolve_video_input("https://www.douyin.com/discover")
+        self.assertIn("video/", str(context.exception))
+
+    def test_short_link_still_accepted(self):
+        ref = resolve_video_input("https://v.douyin.com/iRNBho6u/")
+        self.assertEqual(ref.platform, "douyin")
+        self.assertTrue(ref.video_id.startswith("short_"))
+
+    def test_detail_url_still_accepted(self):
+        ref = resolve_video_input("https://www.douyin.com/video/7296829101289123123")
+        self.assertEqual(ref.video_id, "7296829101289123123")
+        self.assertEqual(ref.cache_key, "dy_7296829101289123123")
+
+
 class HelperTests(unittest.TestCase):
     def test_extract_url_from_chinese_share_text(self):
         text = "看看这个 https://v.douyin.com/iRNBho6u/，超级好用！"

@@ -82,6 +82,41 @@ class WbiPageSelectionTests(unittest.TestCase):
         self.assertIn("99", str(context.exception))
 
 
+class CookieArgumentTests(unittest.TestCase):
+    """Cookie 参数默认不启用，只有显式配置时才传给 yt-dlp。"""
+
+    def test_disabled_by_default(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("YTDLP_COOKIES_FROM_BROWSER", None)
+            os.environ.pop("YTDLP_COOKIE_FILE", None)
+            self.assertEqual(utils._ytdlp_cookie_arguments(), [])
+
+    def test_browser_session(self):
+        with mock.patch.dict(os.environ, {"YTDLP_COOKIES_FROM_BROWSER": "edge"}):
+            self.assertEqual(
+                utils._ytdlp_cookie_arguments(),
+                ["--cookies-from-browser", "edge"],
+            )
+
+    def test_cookie_file_missing_is_ignored(self):
+        with mock.patch.dict(os.environ, {"YTDLP_COOKIE_FILE": "Z:/definitely/missing.txt"}):
+            self.assertEqual(utils._ytdlp_cookie_arguments(), [])
+
+
+class ShortLinkPlaceholderTests(unittest.TestCase):
+    """短链展开失败时不能把首页当成视频去下载。"""
+
+    def test_unresolved_short_link_returns_none(self):
+        ref = resolve_video_input("https://v.douyin.com/iRNBho6u/")
+        self.assertTrue(ref.video_id.startswith("short_"))
+        with mock.patch.object(utils, "_expand_short_link", return_value="https://www.douyin.com/"):
+            with mock.patch.object(utils, "_download_with_ytdlp") as downloader:
+                with mock.patch.object(utils, "ensure_folders_exist"):
+                    result = utils.download_video("https://v.douyin.com/iRNBho6u/")
+        self.assertIsNone(result)
+        downloader.assert_not_called()
+
+
 class SafeCommandTests(unittest.TestCase):
     def test_ytdlp_command_resolves(self):
         command = utils._ytdlp_command()

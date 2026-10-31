@@ -144,6 +144,7 @@ def _bilibili_ref(url: str) -> VideoRef:
 
 def _douyin_ref(url: str) -> VideoRef:
     parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
     path = parsed.path or ""
     match = _DOUYIN_VIDEO_RE.search(path) or _DOUYIN_NOTE_RE.search(path)
     if match:
@@ -157,13 +158,20 @@ def _douyin_ref(url: str) -> VideoRef:
         )
 
     # 短链：用路径片段做稳定缓存键，真正的视频 ID 由 utils 跟随跳转后补全
-    slug = re.sub(r"[^A-Za-z0-9]+", "", path) or "short"
-    return VideoRef(
-        platform="douyin",
-        video_id=f"short_{slug}",
-        canonical_url=url,
-        cache_key=f"dy_{slug}",
-        title_hint="douyin_short",
+    if _host_matches(host, ("v.douyin.com", "v.iesdouyin.com")):
+        slug = re.sub(r"[^A-Za-z0-9]+", "", path) or "short"
+        return VideoRef(
+            platform="douyin",
+            video_id=f"short_{slug}",
+            canonical_url=url,
+            cache_key=f"dy_{slug}",
+            title_hint="douyin_short",
+        )
+
+    # 其余抖音链接（详情页缺 ID、首页、话题页等）没有可下载的单条视频
+    raise UnsupportedLinkError(
+        "该抖音链接中没有单条视频 ID。请使用视频详情页链接"
+        "（https://www.douyin.com/video/...）或 App 分享出的短链。"
     )
 
 

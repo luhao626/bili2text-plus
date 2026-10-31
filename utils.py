@@ -323,6 +323,26 @@ def _explain_download_failure(raw_output):
     return "下载失败，请检查链接是否有效、网络是否正常。"
 
 
+def _ytdlp_cookie_arguments():
+    """可选：使用本机浏览器已有的登录会话下载。
+
+    抖音等平台会要求 "fresh cookies"，即使视频是公开的。这里只是把用户
+    自己浏览器里本来就能正常观看的会话交给 yt-dlp，不涉及任何绕过登录、
+    付费或隐私限制的行为；不配置时完全不启用。
+
+    环境变量：
+        YTDLP_COOKIES_FROM_BROWSER=chrome|edge|firefox|brave
+        YTDLP_COOKIE_FILE=<Netscape 格式 cookies.txt 路径>
+    """
+    cookie_file = (os.getenv("YTDLP_COOKIE_FILE") or "").strip()
+    if cookie_file and os.path.exists(cookie_file):
+        return ["--cookies", cookie_file]
+    browser = (os.getenv("YTDLP_COOKIES_FROM_BROWSER") or "").strip()
+    if browser:
+        return ["--cookies-from-browser", browser]
+    return []
+
+
 def _download_with_ytdlp(ref, output_dir):
     """调用 yt-dlp 下载单个视频；成功返回 True。"""
     output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
@@ -359,6 +379,8 @@ def _download_with_ytdlp(ref, output_dir):
             "-f", "mp4/best",
             "--merge-output-format", "mp4",
         ]
+        # 抖音通常要求 fresh cookies；仅在用户显式配置了浏览器/文件时启用
+        arguments += _ytdlp_cookie_arguments()
 
     arguments.append(ref.canonical_url)
 
@@ -429,8 +451,14 @@ def download_video(link_or_bv, progress=None):
         if expanded and expanded != ref.canonical_url:
             try:
                 ref = resolve_video_input(expanded)
-            except UnsupportedLinkError:
-                print("短链跳转到了无法识别的地址，仍尝试直接下载。")
+            except UnsupportedLinkError as error:
+                print(f"短链跳转后无法识别: {error}")
+                return None
+        # 展开后仍是占位 ID，说明短链失效或跳到了首页，不能把首页当视频下载
+        if ref.video_id.startswith("short_"):
+            print("短链未能解析出具体的视频 ID：链接可能已失效，或跳转到了非视频页面。")
+            print("请改用视频详情页链接后重试；本工具不会绕过登录或访问限制。")
+            return None
 
     print(f"识别结果: {ref.display}")
     notify(f"识别到{ref.display}")
@@ -462,5 +490,9 @@ def download_video(link_or_bv, progress=None):
 
     if ref.platform == "douyin":
         print("抖音视频下载失败：请确认视频为公开可访问状态，且链接未过期。")
+        if not _ytdlp_cookie_arguments():
+            print("提示：抖音通常要求浏览器会话。可在本机设置环境变量")
+            print("      YTDLP_COOKIES_FROM_BROWSER=edge（或 chrome/firefox）后重试，")
+            print("      仅用于你本来就能正常观看的公开视频。")
         print("本工具不会绕过登录、付费或隐私限制。")
     return None
