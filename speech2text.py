@@ -157,6 +157,13 @@ def _collection_slices(filename, prompt):
             result = whisper_model.transcribe(slice_path, initial_prompt=prompt)
             segments = result.get("segments", []) or []
             text = "".join([seg["text"] for seg in segments if seg is not None])
+            # 个别音频（如音乐类）在带提示词时可能整段识别为空；
+            # 去掉提示词重试一次，避免把可转写的音频误判为静音。
+            if not text.strip():
+                print("带提示词转写结果为空，去除提示词重试...")
+                result = whisper_model.transcribe(slice_path)
+                segments = result.get("segments", []) or []
+                text = "".join([seg["text"] for seg in segments if seg is not None])
         print(text)
         texts.append(text)
         groups.append({"index": idx, "segments": segments, "text": text})

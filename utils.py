@@ -9,6 +9,7 @@ import time
 import requests
 from urllib.parse import parse_qs, urlencode, urlparse
 
+import douyin_backend
 from platforms import (
     UnsupportedLinkError,
     is_short_link,
@@ -527,6 +528,20 @@ def download_video(link_or_bv, progress=None):
         print(f"复用已缓存视频: {output_dir}")
         return ref.cache_key
 
+    if ref.platform == "douyin":
+        # 抖音走独立下载后端（隔离环境的修复版 yt-dlp），不影响其他平台
+        try:
+            notify("正在解析抖音视频...")
+            douyin_backend.download_douyin_video(ref, output_dir, progress=notify)
+            return ref.cache_key
+        except douyin_backend.DouyinDownloadError as error:
+            print(f"抖音视频下载失败：{error}")
+            notify("抖音下载失败，详见日志")
+            print("建议：在浏览器里正常播放并下载该视频，然后点击「选择文件…」")
+            print("      或直接输入本地文件路径，用本地文件方式转写。")
+            print("本工具不会绕过登录、付费或隐私限制。")
+            return None
+
     if _download_with_ytdlp(ref, output_dir):
         return ref.cache_key
 
@@ -542,16 +557,4 @@ def download_video(link_or_bv, progress=None):
                 print("WBI 直链下载失败:", str(error))
         return None
 
-    if ref.platform == "douyin":
-        print("抖音视频下载失败：请确认视频为公开可访问状态，且链接未过期。")
-        # 2026-09 起抖音风控会拒绝命令行直连（详情接口返回 403），
-        # 仅靠 cookies 往往无法解决，因此给出立刻可用的兜底方案。
-        print("说明：抖音自 2026 年起对非浏览器访问收紧风控，即使带上浏览器 cookies")
-        print("      也可能返回 403；这不是链接或配置错误。")
-        if not _ytdlp_cookie_arguments():
-            print("      可尝试设置 YTDLP_COOKIES_FROM_BROWSER=edge 或")
-            print("      YTDLP_COOKIE_FILE=<cookies.txt 路径> 后重试。")
-        print("建议：在浏览器里正常播放并下载该视频，然后点击「选择文件…」")
-        print("      或直接输入本地文件路径，用本地文件方式转写。")
-        print("本工具不会绕过登录、付费或隐私限制。")
     return None

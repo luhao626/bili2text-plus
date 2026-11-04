@@ -88,7 +88,14 @@ V2 建立在 `feature/douyin-support` 分支基础上，保留此前已经实现
 * Windows 桌面 UI。
 * Markdown 结果保存、打开与预览。
 
-抖音等平台的在线下载可能受到访问限制，必要时可通过本地文件导入功能处理合法获取的媒体文件。
+抖音在线下载（2026-11 修复分支）：抖音自 2026-09 起对命令行直连收紧风控，常规 yt-dlp 访问详情接口会返回 HTTP 403。本分支通过独立的 `douyin_backend.py` 使用修复版 yt-dlp（上游 PR #17826，提交 `728fe46fbaa97d6f03efcaf9e766d4db63338b8d`，尚未正式合并）在**隔离 Python 环境**中完成抖音下载，主环境 yt-dlp 与 B站 / YouTube 下载路径不受影响。真实链路已验证：抖音公开视频链接 → 下载 → 提取音频 → Whisper 转写 → Markdown。安装修复环境（PowerShell）：
+
+```powershell
+py -3.13 -m venv "$env:LOCALAPPDATA\Bili2TextPlus\douyin-yt-dlp-728fe46-py313"
+& "$env:LOCALAPPDATA\Bili2TextPlus\douyin-yt-dlp-728fe46-py313\Scripts\python.exe" -m pip install "yt-dlp @ git+https://github.com/viking1304/yt-dlp.git@728fe46fbaa97d6f03efcaf9e766d4db63338b8d"
+```
+
+未安装修复环境时，抖音下载会给出明确的安装提示；本地文件导入功能仍可作为兜底。
 
 ## 四、项目测试成果
 
@@ -262,7 +269,7 @@ outputs/
 
 ### 视频下载
 - ✅ 支持 Bilibili 视频下载（BV号或完整链接，`?p=` 分P精确区分）
-- ⚠️ 抖音视频下载：支持解析网页链接、App 分享文案与短链；但**本机实测**命令行直连会被平台接口返回 403（带有效 cookies 也一样，见 `docs/TEST_REPORT.md` 2.4），此时请改用下面的本地文件方式
+- ✅ 抖音视频下载（修复分支）：支持解析网页链接、App 分享文案与短链；需按上文安装独立修复环境（yt-dlp PR #17826，隔离运行，不改主环境）
 - ✅ 支持 YouTube 视频下载
 - ✅ 支持**本地视频/音频文件**直接转写（`选择文件…` 或粘贴路径），用于平台拒绝命令行访问时的兜底
 - ✅ 优先下载 MP4 格式，确保兼容性
