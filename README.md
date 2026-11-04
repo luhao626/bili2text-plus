@@ -88,14 +88,20 @@ V2 建立在 `feature/douyin-support` 分支基础上，保留此前已经实现
 * Windows 桌面 UI。
 * Markdown 结果保存、打开与预览。
 
-抖音在线下载（2026-11 修复分支）：抖音自 2026-09 起对命令行直连收紧风控，常规 yt-dlp 访问详情接口会返回 HTTP 403。本分支通过独立的 `douyin_backend.py` 使用修复版 yt-dlp（上游 PR #17826，提交 `728fe46fbaa97d6f03efcaf9e766d4db63338b8d`，尚未正式合并）在**隔离 Python 环境**中完成抖音下载，主环境 yt-dlp 与 B站 / YouTube 下载路径不受影响。真实链路已验证：抖音公开视频链接 → 下载 → 提取音频 → Whisper 转写 → Markdown。安装修复环境（PowerShell）：
+抖音在线下载（2026-11 修复分支）：抖音自 2026-09 起对命令行直连收紧风控，常规 yt-dlp 访问详情接口会返回 HTTP 403。本分支通过独立的 `douyin_backend.py` 使用修复版 yt-dlp（上游 PR #17826，提交 `728fe46fbaa97d6f03efcaf9e766d4db63338b8d`，尚未正式合并）在**隔离 Python 环境**中完成抖音下载，主环境 yt-dlp 与 B站 / YouTube 下载路径不受影响。真实链路已验证：抖音公开视频链接 → 下载 → 提取音频 → Whisper 转写 → Markdown。
+
+安装修复环境（PowerShell）需要本机已安装 **Python 3.11 或更高版本**（示例用 `py -3.11`；本机验收时实际使用的是 3.13，任何 ≥3.11 的解释器均可）：
 
 ```powershell
-py -3.13 -m venv "$env:LOCALAPPDATA\Bili2TextPlus\douyin-yt-dlp-728fe46-py313"
+py -3.11 -m venv "$env:LOCALAPPDATA\Bili2TextPlus\douyin-yt-dlp-728fe46-py313"
 & "$env:LOCALAPPDATA\Bili2TextPlus\douyin-yt-dlp-728fe46-py313\Scripts\python.exe" -m pip install "yt-dlp @ git+https://github.com/viking1304/yt-dlp.git@728fe46fbaa97d6f03efcaf9e766d4db63338b8d"
 ```
 
+补丁提交必须固定为 `728fe46fbaa97d6f03efcaf9e766d4db63338b8d`，不要改用其他分支或最新版，否则可能重新出现 HTTP 403。
+
 未安装修复环境时，抖音下载会给出明确的安装提示；本地文件导入功能仍可作为兜底。
+
+详细改造记录见 [docs/DOUYIN_MODIFICATION_REPORT.md](docs/DOUYIN_MODIFICATION_REPORT.md)。
 
 ## 四、项目测试成果
 
@@ -131,6 +137,8 @@ py -3.13 -m venv "$env:LOCALAPPDATA\Bili2TextPlus\douyin-yt-dlp-728fe46-py313"
 * 长视频多分块智能笔记尚未完成真实端到端测试。
 * 原文引用检查不能替代完整语义事实核验。
 * 使用者应当自行核对重要的学习内容。
+* 抖音下载依赖独立的 Python ≥3.11 环境与固定 yt-dlp 补丁提交 `728fe46fbaa97d6f03efcaf9e766d4db63338b8d`；该补丁尚未合并进上游，平台接口变化时可能失效，换机需重新安装。
+* 抖音字幕发现仍可能失败并自动回退 Whisper 转写；识别文本与近似时间码需人工核对。
 
 ---
 
